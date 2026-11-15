@@ -1,0 +1,92 @@
+# The daily sync with upstream (ROADMAP-AMD.md, J1): merge tylertms/Stela's
+# main into sync/upstream, never by rebase, run the fork's checks on the
+# merge, and open a pull request into main only once they pass.
+#
+# A merge that conflicts fails here with nothing pushed; it is then done by
+# hand, with git rerere on, and pushed to sync/upstream.
+#
+# The repository must let GitHub Actions create pull requests
+# (Settings > Actions > General > Workflow permissions).
+name: amd-sync-upstream
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: amd-sync-upstream
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  UPSTREAM: https://github.com/tylertms/Stela.git
+  BRANCH: sync/upstream
+
+jobs:
+  merge:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      changed: ${{ steps.merge.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Merge upstream/main
+        id: merge
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "$UPSTREAM"
+          git fetch --no-tags upstream main
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "main already holds upstream/main"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git switch -c "$BRANCH"
+          if ! git merge --no-ff --no-edit -m "Merge upstream/main into $BRANCH" upstream/main; then
+            git diff --name-only --diff-filter=U | sed 's/^/conflict: /'
+            echo "::error::upstream/main conflicts with main; merge it by hand with git rerere on"
+            exit 1
+          fi
+          git push --force origin "HEAD:refs/heads/$BRANCH"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+  check:
+    needs: merge
+    if: needs.merge.outputs.changed == 'true'
+    uses: ./.github/workflows/amd-ci.yml
+    with:
+      ref: sync/upstream
+
+  pull-request:
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Open the pull request
+        run: |
+          if [ -n "$(gh pr list --head "$BRANCH" --base main --state open --json number --jq '.[].number')" ]; then
+            echo "The pull request from $BRANCH is already open; the push updated it"
+            exit 0
+          fi
+          gh pr create --head "$BRANCH" --base main \
+            --title "Merge upstream/main" \
+            --body "The daily merge of tylertms/Stela's main. amd-ci passed on this merge: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

@@ -1,0 +1,89 @@
+# The AMD fork's own checks (ROADMAP-AMD.md, J1): the format, lint and unit
+# tests of the crates that carry the AMD code. Upstream's ci.yml still runs
+# beside it and covers the stela command.
+#
+# amd-sync-upstream.yml calls this workflow on the merged sync/upstream branch
+# before it opens its pull request, so it also takes a ref to check out.
+name: amd-ci
+
+on:
+  push:
+    branches: [main, "amd/**"]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: The branch, tag or commit to check
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: amd-ci-${{ inputs.ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # The crates the fork adds to or changes for AMD.
+  AMD_CRATES: -p stela-driver-gpu -p stela-boot-core -p stela-amd-host
+
+jobs:
+  amd:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
+      - name: Put LLVM on PATH
+        run: |
+          # The same LLVM 21 as upstream's ci.yml, for the crates' C builds.
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+          release="$(lsb_release -cs)"
+          echo "deb http://apt.llvm.org/$release/ llvm-toolchain-$release-21 main" | sudo tee /etc/apt/sources.list.d/llvm-21.list
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends clang-21 llvm-21
+          echo /usr/lib/llvm-21/bin >> "$GITHUB_PATH"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.rustup/toolchains
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-amd-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-amd-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install
+          rustc --version
+
+      - name: Format
+        run: |
+          for crate in stela-driver-gpu stela-boot-core stela-amd-host; do
+            cargo fmt -p "$crate" -- --check
+          done
+
+      - name: Clippy
+        run: |
+          cargo clippy --locked $AMD_CRATES --all-targets -- -D warnings
+          cargo clippy --locked -p stela-driver-gpu --features metal-vulkan --all-targets -- -D warnings
+
+      - name: Test
+        run: |
+          cargo test --locked -p stela-boot-core -p stela-amd-host
+          cargo test --locked -p stela-driver-gpu --features metal
+          cargo test --locked -p stela-driver-gpu --features metal-vulkan
