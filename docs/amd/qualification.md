@@ -91,13 +91,15 @@ Code de sortie : 0.
 
 ### Les manques Metal
 
-| Manque | Origine | Commentaire |
+Vérifiés avec `vulkaninfo --show-formats` et les fonctions sparse de RADV : aucun ne se règle côté Stela.
+
+| Manque | Origine | Constat |
 | --- | --- | --- |
-| Formats 4:2:2 | Pilote | À vérifier : formats `G8B8G8R8_422` et `B8G8R8G8_422` dans RADV |
-| Depth24Unorm_Stencil8 | Pilote | Attendu : les GPU AMD n'ont pas de D24S8. Metal le rend facultatif sur Mac (`depth24Stencil8PixelFormatSupported`) |
-| Flou de mouvement des primitives | Pilote | Lié au ray tracing, sans effet sur le démarrage |
-| Textures sparse multi-échantillonnées | Pilote | RADV n'expose pas `sparseResidency*Samples` |
-| Ressources sparse en placement, comptage des tile dispatch, Apple8+, Metal4 | Architecture Apple | Hors de portée d'un GPU non Apple, comme sur NVIDIA |
+| Formats 4:2:2 | Stela, pour tous les GPU | Vulkan n'échantillonne ces formats qu'à travers un sampler de conversion Y'CbCr immuable, ce que les liaisons séparées de Metal ne permettent pas (`Unrealized::YcbcrConversion`). Le manque apparaît donc aussi sur NVIDIA. RADV ne fournit d'ailleurs pas `G8B8G8R8_422_UNORM` ni `B8G8R8G8_422_UNORM`. |
+| Depth24Unorm_Stencil8 | Matériel AMD | RADV ne fournit pas `D24_UNORM_S8_UINT`, ni `X8_D24_UNORM_PACK32`. C'est facultatif sur Mac (`depth24Stencil8PixelFormatSupported`), et macOS se rabat sur Depth32Float_Stencil8. |
+| Flou de mouvement des primitives | Pilote | Lié au ray tracing, sans effet sur le démarrage. |
+| Textures sparse multi-échantillonnées | RADV | `sparseResidency2/4/8/16Samples` valent `false`. Les textures sparse 2D et 3D sont prises en charge. Limite connue de RADV. |
+| Ressources sparse en placement, comptage des tile dispatch, Apple8+, Metal4 | Architecture Apple | Hors de portée d'un GPU non Apple, comme sur NVIDIA. |
 
 ### Alignements que renvoie RADV
 

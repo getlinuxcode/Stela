@@ -64,9 +64,10 @@ Fait sous Linux (Ubuntu 24.04, noyau 6.14, Mesa 25.2.8) :
 
 À faire ensuite, dans cet ordre :
 
-1. J2 : examiner les manques Metal attribués au pilote (formats 4:2:2, textures sparse multi-échantillonnées) et proposer à upstream le correctif sur la topologie, qui sert à tout pilote sans cette propriété.
-2. J1, dernier point : brancher l'écran sur la carte mère, ou suivre la machine à distance, avant le premier essai en VM. Avec `--stop-desktop`, le bureau Linux s'arrête pendant l'essai. Noter ensuite combien d'essais d'affilée passent sans redémarrer l'hôte.
-3. J3 : construire le compilateur avec la cible AMD (`cargo xtask gpu fetch`, Mesa). La sonde AIR→ACO existe déjà dans `crates/stela-driver-gpu/src/amd/tests/air_aco.c` et se construit avec Meson (`src/compiler/meson.build`).
+1. J2 : les manques Metal sont examinés, et aucun ne se règle côté Stela. Reste à ouvrir la PR upstream du correctif sur la topologie (branche `pr/topology-variants`, prête et testée sur la base d'upstream).
+2. J3 : `cargo xtask gpu fetch` s'arrête faute du paquet `python3.12-venv`. Une fois ce paquet installé, construire les compilateurs avec la cible AMD : `cargo xtask gpu compilers`, avec `--llvm-library` et `--llvm-config` pour le frontal AIR, qui demande LLVM 23. La sonde AIR→ACO existe déjà dans `crates/stela-driver-gpu/src/amd/tests/air_aco.c`.
+3. J3 : la suite `metal-suite offline` lit l'AIR qu'un Mac compile (`metal-suite mac`), et `coverage` lit les metallibs système d'un Mac. Sans Mac, il faudra les extraire d'une image de macOS 27.
+4. J1, dernier point : le Ryzen 5 5600X n'a pas de puce graphique, et la 9070 XT est la seule sortie d'affichage. Avant le premier essai en VM, il faut ajouter une petite carte graphique pour l'écran de Linux, ou lancer l'essai par SSH et suivre la VM par VNC. Avec `--stop-desktop`, le bureau Linux s'arrête pendant l'essai. Noter ensuite combien d'essais d'affilée passent sans redémarrer l'hôte.
 
 ## Jalons
 
@@ -94,7 +95,8 @@ Fait sous Linux (Ubuntu 24.04, noyau 6.14, Mesa 25.2.8) :
 - [x] `stela-amd-host` : lit la version du cœur graphique et le lien PCIe dans sysfs, admet la carte et calcule le profil Metal (familles de GPU, et ce qui manque avec sa cause).
 - [x] Lancer l'outil sur la 9070 XT (Linux 6.12+, Mesa récent) et archiver sa sortie dans `docs/amd/qualification.md`.
 - [x] Lever le blocage `dynamicPrimitiveTopologyUnrestricted` : variantes de pipeline par classe de topologie quand le pilote ne fournit pas la propriété.
-- [ ] Traiter chaque manque Metal attribué au pilote : réglage Stela, ou limite connue de RADV.
+- [x] Traiter chaque manque Metal attribué au pilote : tous sont des limites connues (RADV, matériel AMD, ou Stela pour tous les GPU), voir `docs/amd/qualification.md`.
+- [ ] Proposer le correctif sur la topologie à upstream (branche `pr/topology-variants`, prête).
 - [ ] Remplacer les alignements estimés (256 octets) par les valeurs que RADV renvoie réellement.
 
 **Terminé quand** les fonctions requises sont présentes (19 depuis le correctif sur la topologie), l'import dma-buf aussi, et Metal3 + Apple7 sont atteints sur la vraie carte. C'est atteint depuis le 15 novembre 2026. Restent les manques Metal et les alignements.
