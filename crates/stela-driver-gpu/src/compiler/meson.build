@@ -423,6 +423,18 @@ if stela_air_llvm != ''
     )
   endif
   if with_amd
+    # The same sweep with RADV's NIR options for an AMD family (--gpu).
+    stela_metal_corpus_amd = executable(
+      'stela_metal_corpus_amd',
+      'tests/metal_corpus.c',
+      include_directories : [inc_include, inc_src, inc_gpu, inc_amd, inc_amd_common],
+      dependencies : stela_air_test_dependencies + [idep_aco, idep_amd_generated_headers],
+      link_with : [stela_metal_compiler, stela_metal_abi, stela_air_test_links, libamd_common] +
+                  stela_aco_links,
+      c_args : ['-DSTELA_METAL_CORPUS_AMD'],
+      link_args : stela_dead_strip,
+      build_rpath : fs.parent(stela_air_llvm),
+    )
     if with_amd_llvm
       stela_amd_air_llvm_test = executable(
         'stela_amd_air_llvm_test',
