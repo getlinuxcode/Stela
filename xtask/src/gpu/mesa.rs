@@ -119,14 +119,38 @@ fn artifacts(directory: &Path, report: &Report) -> Result<Vec<Value>> {
 
 fn inspect_archive(path: &Path, stela_library: bool) -> Result<Value> {
     let data = fs::read(path)?;
-    let archive = ArchiveFile::parse(&*data)?;
+    // glibc installs some static libraries (libm.a, libc.a) as GNU ld
+    // scripts grouping the archives that hold the objects.
+    if !stela_library && data.starts_with(b"/* GNU ld script") {
+        let script = String::from_utf8_lossy(&data);
+        let members = script
+            .split(|c: char| c.is_whitespace() || c == '(' || c == ')')
+            .filter(|word| word.starts_with('/') && word.ends_with(".a"))
+            .map(|member| inspect_archive(Path::new(member), false))
+            .collect::<Result<Vec<_>>>()?;
+        ensure!(!members.is_empty(), "{} groups no archives", path.display());
+        return Ok(json!({"binding": tools::binding(path)?, "ld_script": members}));
+    }
+    let archive = ArchiveFile::parse(&*data).with_context(|| path.display().to_string())?;
     let mut formats = BTreeSet::new();
     let mut architectures = BTreeSet::new();
     let mut undefined = BTreeSet::new();
     let mut count = 0;
     for member in archive.members() {
         let member = member?;
-        let object = object::File::parse(member.data(&*data)?)
+        // A thin archive, which GNU ar makes for Meson, names its members'
+        // files relative to itself instead of holding them.
+        let file;
+        let bytes = if archive.is_thin() {
+            let name = std::str::from_utf8(member.name()).context("thin member name")?;
+            let parent = path.parent().context("archive directory")?;
+            file = fs::read(parent.join(name))
+                .with_context(|| format!("{name}, a member of {}", path.display()))?;
+            &file[..]
+        } else {
+            member.data(&*data)?
+        };
+        let object = object::File::parse(bytes)
             .with_context(|| format!("non-object member in {}", path.display()))?;
         ensure!(
             object.kind() == object::ObjectKind::Relocatable,
@@ -143,7 +167,13 @@ fn inspect_archive(path: &Path, stela_library: bool) -> Result<Value> {
         }
         count += 1;
     }
-    ensure!(count > 0, "{} contains no objects", path.display());
+    // glibc 2.34 and newer ship libdl, libpthread and librt as empty
+    // archives, their functions having moved into libc.
+    ensure!(
+        count > 0 || !stela_library,
+        "{} contains no objects",
+        path.display()
+    );
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
