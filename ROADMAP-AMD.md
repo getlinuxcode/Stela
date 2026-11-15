@@ -59,9 +59,9 @@ sudo xtask/scripts/vfio-gpu.sh run --stop-desktop --seconds 1800 -- \
 
 ### J1 : Infrastructure du fork
 
-- [ ] Créer le fork et y appliquer les patchs J0 et J2.
-- [ ] Workflow GitHub Actions quotidien : merge de `upstream/main` dans `sync/upstream`, tests, puis PR automatique si tout passe.
-- [ ] CI propre au fork : `cargo test` sur `stela-driver-gpu` (fonctionnalités `metal`, `metal-vulkan`), `stela-boot-core` et `stela-amd-host`, plus clippy et rustfmt.
+- [x] Créer le fork et y appliquer les patchs J0 et J2 (branche `amd/j0-j2`).
+- [ ] Workflow GitHub Actions quotidien (`amd-sync-upstream.yml`, écrit, pas encore lancé) : merge de `upstream/main` dans `sync/upstream`, tests, puis PR automatique si tout passe.
+- [x] CI propre au fork (`amd-ci.yml`) : `cargo test` sur `stela-driver-gpu` (fonctionnalités `metal`, `metal-vulkan`), `stela-boot-core` et `stela-amd-host`, plus clippy et rustfmt.
 - [x] `vfio-gpu.sh` sait prêter une Radeon RDNA 4 à la VM.
 - [ ] Premier lancement de Stela en VM avec la 9070 XT prêtée : l'écran de démarrage nomme la carte et la rend proprement à la fin. Mesurer comment la réinitialisation se comporte sur plusieurs essais d'affilée.
 
