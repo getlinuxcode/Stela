@@ -4,7 +4,11 @@
  * coverage sweep of the Metal device's bring-up. Each argument is an
  * .air module from Apple's `metal -c`; the inputs are never committed.
  *
- *   stela_metal_corpus [--sm SM] [--fill BYTE] MODULE.air...
+ *   stela_metal_corpus [--sm SM] [--fill BYTE] [--entry NAME] [--nir FILE] MODULE.air...
+ *
+ * --entry compiles only that entry point, and --nir writes its NIR to FILE.
+ * Built with STELA_METAL_CORPUS_AMD, the tool takes --gpu FAMILY instead of
+ * --sm and compiles with RADV's NIR options (amd/tests/metal_corpus_target.h).
  *
  * A kernel takes a 64-thread threadgroup and every threadgroup buffer its
  * declared bytes; a render function is linked with the varyings it writes
@@ -17,15 +21,57 @@
 #include "compiler/glsl_types.h"
 #include "compiler/metal_compiler.h"
 #include "llvm-c/BitReader.h"
+#include "compiler/nir/nir.h"
 #include "llvm-c/Core.h"
-#include "nouveau/compiler/nak.h"
-#include "nouveau/headers/nv_device_info.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef STELA_METAL_CORPUS_AMD
+#include "../../amd/tests/metal_corpus_target.h"
+#else
+#include "nouveau/compiler/nak.h"
+#include "nouveau/headers/nv_device_info.h"
+
+#define STELA_CORPUS_TARGET_OPTION "--sm"
+#define STELA_CORPUS_TARGET_DEFAULT "120"
+
+static struct nak_compiler *stela_corpus_nak;
+
+/* Fills target with NAK's NIR options for SM name; false after reporting
+ * why. */
+static bool
+stela_corpus_target_open(const char *name, struct stela_metal_target *target)
+{
+   unsigned sm = (unsigned)atoi(name);
+   const struct nv_device_info device = {.sm = (uint8_t)sm, .max_warps_per_mp = 48};
+   stela_corpus_nak = nak_compiler_create(&device);
+   if (!stela_corpus_nak) {
+      fprintf(stderr, "NAK refused SM %u\n", sm);
+      return false;
+   }
+   *target = (struct stela_metal_target){
+      .nir = nak_nir_options(stela_corpus_nak), .max_instructions = 1u << 20,
+      .max_threadgroup_bytes = 49152, .max_private_bytes = 1u << 16, .max_constant_bytes = 65536,
+      .max_varying_slots = 31, .max_payload_bytes = 16384, .max_mesh_vertices = 256,
+      .max_mesh_primitives = 512, .raster_order_groups = 1, .fragment_tests = 1,
+   };
+   return true;
+}
+
+static void
+stela_corpus_target_close(void)
+{
+   nak_compiler_destroy(stela_corpus_nak);
+}
+#endif
+
 #define WRAPPER_MAGIC 0x0b17c0deu
+
+/* --entry and --nir. */
+static const char *only_entry;
+static const char *nir_path;
 
 static struct stela_metal_reflection reflection;
 static struct stela_air_constant_value constants[STELA_METAL_FUNCTION_CONSTANTS];
@@ -213,6 +259,8 @@ sweep(const char *path, const struct stela_metal_target *target)
       const char *name = LLVMGetValueName2(fn, &name_bytes);
       if (LLVMIsDeclaration(fn) || !name_bytes)
          continue;
+      if (only_entry && (strlen(only_entry) != name_bytes || memcmp(only_entry, name, name_bytes)))
+         continue;
       char *entry = strndup(name, name_bytes);
       struct stela_air_error error;
       bool reflected = stela_metal_reflect(air, size, entry, NULL, 0, &reflection, &error);
@@ -235,6 +283,14 @@ sweep(const char *path, const struct stela_metal_target *target)
             shader = compile(air, size, entry, target, true, &error);
          if (shader) {
             printf("%s %s: ok%s\n", path, entry, tile ? " (tile)" : "");
+            FILE *nir = nir_path ? fopen(nir_path, "w") : NULL;
+            if (nir) {
+               nir_print_shader(shader, nir);
+               fclose(nir);
+            } else if (nir_path) {
+               printf("%s: unwritable\n", nir_path);
+               refused++;
+            }
             stela_metal_release(shader);
          } else {
             printf("%s %s: refused (%u): %s\n", path, entry, error.kind, error.detail);
@@ -255,38 +311,36 @@ sweep(const char *path, const struct stela_metal_target *target)
 int
 main(int argc, char **argv)
 {
-   unsigned sm = 120;
+   const char *target_name = STELA_CORPUS_TARGET_DEFAULT;
    int first = 1;
    while (first + 1 < argc && !strncmp(argv[first], "--", 2)) {
-      if (!strcmp(argv[first], "--sm"))
-         sm = (unsigned)atoi(argv[first + 1]);
+      if (!strcmp(argv[first], STELA_CORPUS_TARGET_OPTION))
+         target_name = argv[first + 1];
       else if (!strcmp(argv[first], "--fill"))
          fill = atoi(argv[first + 1]);
+      else if (!strcmp(argv[first], "--entry"))
+         only_entry = argv[first + 1];
+      else if (!strcmp(argv[first], "--nir"))
+         nir_path = argv[first + 1];
       else
          break;
       first += 2;
    }
    if (first >= argc) {
-      fprintf(stderr, "usage: %s [--sm SM] [--fill BYTE] MODULE.air...\n", argv[0]);
+      fprintf(stderr, "usage: %s [" STELA_CORPUS_TARGET_OPTION " TARGET] [--fill BYTE] "
+              "[--entry NAME] [--nir FILE] MODULE.air...\n", argv[0]);
       return 2;
    }
    glsl_type_singleton_init_or_ref();
-   const struct nv_device_info device = {.sm = (uint8_t)sm, .max_warps_per_mp = 48};
-   struct nak_compiler *nak = nak_compiler_create(&device);
-   if (!nak) {
-      fprintf(stderr, "NAK refused SM %u\n", sm);
+   struct stela_metal_target target;
+   if (!stela_corpus_target_open(target_name, &target)) {
+      glsl_type_singleton_decref();
       return 2;
    }
-   const struct stela_metal_target target = {
-      .nir = nak_nir_options(nak), .max_instructions = 1u << 20, .max_threadgroup_bytes = 49152,
-      .max_private_bytes = 1u << 16, .max_constant_bytes = 65536, .max_varying_slots = 31,
-      .max_payload_bytes = 16384, .max_mesh_vertices = 256, .max_mesh_primitives = 512,
-      .raster_order_groups = 1, .fragment_tests = 1,
-   };
    unsigned refused = 0;
    for (int i = first; i < argc; i++)
       refused += sweep(argv[i], &target);
-   nak_compiler_destroy(nak);
+   stela_corpus_target_close();
    glsl_type_singleton_decref();
    printf("%u refused\n", refused);
    return refused != 0;

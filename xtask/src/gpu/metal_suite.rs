@@ -137,6 +137,10 @@ pub enum Command {
         selection: Selection,
         #[arg(long)]
         compiler: PathBuf,
+        /// The AMD family `stela_metal_corpus_amd` compiles for (such as
+        /// gfx1201); results go to DIR/offline-FAMILY.
+        #[arg(long)]
+        gpu: Option<String>,
     },
     /// Rank the AIR intrinsic families macOS's own shaders call that the
     /// suite's libraries (DIR/plan/lib, from `mac`) never call.
@@ -190,7 +194,8 @@ pub fn run(command: Command) -> Result<()> {
         Command::Offline {
             selection,
             compiler,
-        } => remote::offline(&selection.out(), &compiler, &selection.only),
+            gpu,
+        } => remote::offline(&selection.out(), &compiler, gpu.as_deref(), &selection.only),
         Command::Coverage {
             selection,
             host,

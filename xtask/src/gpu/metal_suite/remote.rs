@@ -399,11 +399,12 @@ pub fn probe(out: &Path, host: &str) -> Result<()> {
 }
 
 /// Compiles each case's functions with Stela's compiler from the AIR the
-/// Mac produced, recording acceptance and NIR in DIR/offline.
-pub fn offline(out: &Path, compiler: &Path, only: &[String]) -> Result<()> {
+/// Mac produced, recording acceptance and NIR in DIR/offline, or in
+/// DIR/offline-GPU for an AMD family.
+pub fn offline(out: &Path, compiler: &Path, gpu: Option<&str>, only: &[String]) -> Result<()> {
     let plan = plan::load(&out.join("plan"))?;
     let lib = out.join("plan/lib");
-    let dir = out.join("offline");
+    let dir = out.join(gpu.map_or_else(|| "offline".into(), |gpu| format!("offline-{gpu}")));
     fs::create_dir_all(&dir)?;
     let mut seen: BTreeMap<(String, String), Value> = BTreeMap::new();
     for case in plan["cases"].as_array().unwrap() {
@@ -439,6 +440,9 @@ pub fn offline(out: &Path, compiler: &Path, only: &[String]) -> Result<()> {
                 continue;
             }
             let mut command = Command::new(compiler);
+            if let Some(gpu) = gpu {
+                command.args(["--gpu", gpu]);
+            }
             command
                 .args(["--entry", entry, "--nir"])
                 .arg(dir.join(format!("{library}.{entry}.nir")));
