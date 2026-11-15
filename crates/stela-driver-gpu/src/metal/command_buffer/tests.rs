@@ -72,6 +72,8 @@ struct MockResolver {
     layouts: Vec<GeneratedLayoutKey>,
     /// The bicubic samplers of each render variant asked for.
     bicubic: Vec<[u32; 2]>,
+    /// The topology class of each render variant asked for.
+    topologies: Vec<PrimitiveTopologyClass>,
 }
 
 impl ChunkSource for MockResolver {
@@ -113,9 +115,13 @@ impl Resolver for MockResolver {
         &mut self,
         _: &RenderPipelineState,
         bicubic: [u32; 2],
+        topology: PrimitiveTopologyClass,
     ) -> Result<Pipeline> {
         self.bicubic.push(bicubic);
-        Ok(Pipeline(800 + u64::from(bicubic[0] | bicubic[1] << 16)))
+        self.topologies.push(topology);
+        Ok(Pipeline(
+            800 + u64::from(bicubic[0] | bicubic[1] << 16) + (topology.raw() << 40),
+        ))
     }
 
     fn mesh_pipeline(
@@ -834,6 +840,58 @@ fn draws_through_bicubic_samplers_bind_the_variant_filtering_them() {
         })
         .collect();
     assert_eq!(bound, [42, 800 + (1 << 2 << 16), 42]);
+}
+
+#[test]
+fn point_and_line_draws_bind_the_variant_of_their_topology_class() {
+    let color = texture(PixelFormat::Rgba8Unorm);
+    let mut resolver = MockResolver::default();
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands
+        .begin_render(
+            &mut resolver,
+            pass(&color, StoreAction::Store, false),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+    let mut state = render_state(1);
+    state.plan.topology_class = PrimitiveTopologyClass::Unspecified;
+    state.plan.topology_variants = true;
+    commands.set_render_pipeline_state(&state).unwrap();
+    commands
+        .set_render_buffer(Stage::Vertex, Some(buffer(3, 256)), 0, 2)
+        .unwrap();
+    for primitive in [
+        PrimitiveType::Triangle,
+        PrimitiveType::Point,
+        PrimitiveType::Line,
+        PrimitiveType::LineStrip,
+        PrimitiveType::TriangleStrip,
+    ] {
+        commands
+            .draw_primitives(&mut resolver, primitive, 0, 3, 1, 0)
+            .unwrap();
+    }
+    commands.end_encoding(&mut resolver).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
+    let line = PrimitiveTopologyClass::Line;
+    assert_eq!(
+        resolver.topologies,
+        [PrimitiveTopologyClass::Point, line, line]
+    );
+    let bound: Vec<_> = recording.segments[0]
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::BindPipeline {
+                bind_point: PipelineBindPoint::Graphics,
+                pipeline,
+            } => Some(pipeline.0),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bound, [42, 800 + (1 << 40), 800 + (2 << 40), 42]);
 }
 
 #[test]

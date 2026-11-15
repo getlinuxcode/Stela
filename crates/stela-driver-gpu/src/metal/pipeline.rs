@@ -105,7 +105,9 @@ pub const fn stencil_op(operation: StencilOperation) -> StencilOp {
 }
 
 /// The pipeline topology for a Metal input class; draws set the exact
-/// topology dynamically (`dynamicPrimitiveTopologyUnrestricted`).
+/// topology dynamically. Without `dynamicPrimitiveTopologyUnrestricted`,
+/// draws stay in the pipeline's class, and point and line draws of an
+/// unspecified class run a variant ([`RenderPipelinePlan::topology_variants`]).
 pub const fn class_topology(class: PrimitiveTopologyClass) -> PrimitiveTopology {
     match class {
         PrimitiveTopologyClass::Point => PrimitiveTopology::PointList,
@@ -447,6 +449,13 @@ pub struct RenderPipelinePlan {
     /// test no depth or stencil in the pipeline, and the pass's depth and
     /// stencil live in their copies while they draw.
     pub tests_fragments: bool,
+    /// Its class is unspecified and the device lacks
+    /// `dynamicPrimitiveTopologyUnrestricted`: point and line draws bind a
+    /// variant created with their own class
+    /// ([`Resolver::bicubic_render_pipeline`]).
+    ///
+    /// [`Resolver::bicubic_render_pipeline`]: super::command_buffer::Resolver::bicubic_render_pipeline
+    pub topology_variants: bool,
 }
 
 pub fn render_pipeline(
@@ -938,6 +947,7 @@ fn targets(
         mesh: None,
         tessellation: None,
         tests_fragments,
+        topology_variants: false,
     })
 }
 

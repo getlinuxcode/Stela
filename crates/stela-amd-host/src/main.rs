@@ -183,9 +183,23 @@ fn memory(probed: &Probed) {
 fn requirements(probed: &Probed) -> bool {
     let missing: Vec<_> = probed.missing().collect();
     if missing.is_empty() {
-        println!("  backend requirements: all 20 present");
+        println!(
+            "  backend requirements: all {} present",
+            probed.requirements.len()
+        );
     } else {
         println!("  backend requirements missing: {}", missing.join(", "));
+    }
+    if !probed
+        .snapshot
+        .features
+        .dynamic_primitive_topology_unrestricted
+    {
+        println!(
+            "  primitive topology: restricted to the pipeline's class; \
+             point and line draws of unspecified pipelines compile a variant, \
+             and GPU-encoded commands cannot switch to those pipelines"
+        );
     }
     println!(
         "  dma-buf import: {}",

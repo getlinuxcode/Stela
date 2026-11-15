@@ -1125,21 +1125,35 @@ fn pipelines_made_before_admission_compile_again_on_next_use() {
         let state = device.render_pipeline_state(id).unwrap();
         (state.id, state.pipeline.unwrap())
     };
-    let early = device.render_variant(state_id, [0, 1]).unwrap();
+    let early = device
+        .render_variant(state_id, [0, 1], PrimitiveTopologyClass::Unspecified)
+        .unwrap();
     device.admit_bicubic(vertex).unwrap();
     device.admit_bicubic(fragment).unwrap();
     device.outdate_pipelines(&[vertex, fragment]);
     assert!(device.render_pipeline_state(id).unwrap().outdated);
     let compiled = device.compiler.compiled.len();
-    let late = device.render_variant(state_id, [0; 2]).unwrap();
+    let late = device
+        .render_variant(state_id, [0; 2], PrimitiveTopologyClass::Unspecified)
+        .unwrap();
     assert_ne!(late, base);
-    assert_ne!(device.render_variant(state_id, [0, 1]).unwrap(), early);
+    assert_ne!(
+        device
+            .render_variant(state_id, [0, 1], PrimitiveTopologyClass::Unspecified)
+            .unwrap(),
+        early
+    );
     assert!(
         device.compiler.compiled[compiled..]
             .iter()
             .all(|stage| stage.bicubic_arguments)
     );
-    assert_eq!(device.render_variant(state_id, [0; 2]).unwrap(), late);
+    assert_eq!(
+        device
+            .render_variant(state_id, [0; 2], PrimitiveTopologyClass::Unspecified)
+            .unwrap(),
+        late
+    );
 }
 
 fn bicubic_request(vertex: FunctionId, fragment: FunctionId) -> RenderPipelineRequest {
@@ -1159,6 +1173,99 @@ fn bicubic_request(vertex: FunctionId, fragment: FunctionId) -> RenderPipelineRe
 }
 
 #[test]
+fn unspecified_pipelines_draw_points_and_lines_through_variants_without_unrestricted_topology() {
+    let mut backend = MockBackend::new();
+    backend
+        .physical
+        .as_mut()
+        .unwrap()
+        .features
+        .dynamic_primitive_topology_unrestricted = false;
+    let mut device = device_on(backend);
+    let vertex = device.new_function(LIBRARY, "vertex", Some(&[])).unwrap();
+    let fragment = device.new_function(LIBRARY, "fragment", Some(&[])).unwrap();
+    let request = RenderPipelineRequest {
+        input_primitive_topology: PrimitiveTopologyClass::Unspecified,
+        support_indirect_command_buffers: true,
+        ..bicubic_request(vertex, fragment)
+    };
+    let id = device.new_render_pipeline(&request).unwrap();
+    let state = device.render_pipeline_state(id).unwrap();
+    let (state_id, base) = (state.id, state.pipeline.unwrap());
+    assert!(state.plan.topology_variants);
+    // GPU-encoded commands bind no variants, so the pipeline is not theirs.
+    assert!(!state.plan.info.indirect_bindable);
+    assert_eq!(state.plan.info.topology, PrimitiveTopology::TriangleList);
+
+    let unspecified = PrimitiveTopologyClass::Unspecified;
+    assert_eq!(
+        device
+            .render_variant(state_id, [0; 2], unspecified)
+            .unwrap(),
+        base
+    );
+    let triangle = PrimitiveTopologyClass::Triangle;
+    assert_eq!(
+        device.render_variant(state_id, [0; 2], triangle).unwrap(),
+        base
+    );
+
+    let point = device
+        .render_variant(state_id, [0; 2], PrimitiveTopologyClass::Point)
+        .unwrap();
+    assert_ne!(point, base);
+    let created = device.backend().graphics.last().unwrap();
+    assert_eq!(created.topology, PrimitiveTopology::PointList);
+    assert!(!created.indirect_bindable);
+    let line = device
+        .render_variant(state_id, [0; 2], PrimitiveTopologyClass::Line)
+        .unwrap();
+    assert_ne!(line, point);
+    assert_eq!(
+        device.backend().graphics.last().unwrap().topology,
+        PrimitiveTopology::LineList
+    );
+    // Each class compiles once, and apart from bicubic masks.
+    let created = device.backend().graphics.len();
+    assert_eq!(
+        device
+            .render_variant(state_id, [0; 2], PrimitiveTopologyClass::Point)
+            .unwrap(),
+        point
+    );
+    assert_eq!(device.backend().graphics.len(), created);
+    let bicubic_point = device
+        .render_variant(state_id, [0, 1 << 2], PrimitiveTopologyClass::Point)
+        .unwrap();
+    assert_ne!(bicubic_point, point);
+    assert_eq!(
+        device.backend().graphics.last().unwrap().topology,
+        PrimitiveTopology::PointList
+    );
+}
+
+#[test]
+fn unrestricted_topology_draws_every_class_with_the_pipeline() {
+    let mut device = device();
+    let vertex = device.new_function(LIBRARY, "vertex", Some(&[])).unwrap();
+    let fragment = device.new_function(LIBRARY, "fragment", Some(&[])).unwrap();
+    let request = RenderPipelineRequest {
+        input_primitive_topology: PrimitiveTopologyClass::Unspecified,
+        ..bicubic_request(vertex, fragment)
+    };
+    let id = device.new_render_pipeline(&request).unwrap();
+    let state = device.render_pipeline_state(id).unwrap();
+    let (state_id, base) = (state.id, state.pipeline.unwrap());
+    assert!(!state.plan.topology_variants);
+    for class in [PrimitiveTopologyClass::Point, PrimitiveTopologyClass::Line] {
+        assert_eq!(
+            device.render_variant(state_id, [0; 2], class).unwrap(),
+            base
+        );
+    }
+}
+
+#[test]
 fn bicubic_render_variants_compile_once_per_sampler_mask() {
     let mut device = device();
     let vertex = device.new_function(LIBRARY, "vertex", Some(&[])).unwrap();
@@ -1170,10 +1277,17 @@ fn bicubic_render_variants_compile_once_per_sampler_mask() {
     let (state_id, base) = (state.id, state.pipeline.unwrap());
     assert_eq!(state.bicubic, [0; 2]);
     // The pipeline's own mask is the pipeline.
-    assert_eq!(device.render_variant(state_id, [0; 2]).unwrap(), base);
+    assert_eq!(
+        device
+            .render_variant(state_id, [0; 2], PrimitiveTopologyClass::Unspecified)
+            .unwrap(),
+        base
+    );
 
     let compiled = device.compiler.compiled.len();
-    let variant = device.render_variant(state_id, [0, 1 << 2]).unwrap();
+    let variant = device
+        .render_variant(state_id, [0, 1 << 2], PrimitiveTopologyClass::Unspecified)
+        .unwrap();
     assert_ne!(variant, base);
     let stages: Vec<_> = device.compiler.compiled[compiled..]
         .iter()
@@ -1182,11 +1296,15 @@ fn bicubic_render_variants_compile_once_per_sampler_mask() {
     assert_eq!(stages, [0, 1 << 2]);
     // The variant compiles once; another mask is another variant.
     assert_eq!(
-        device.render_variant(state_id, [0, 1 << 2]).unwrap(),
+        device
+            .render_variant(state_id, [0, 1 << 2], PrimitiveTopologyClass::Unspecified)
+            .unwrap(),
         variant
     );
     assert_eq!(device.compiler.compiled.len(), compiled + 2);
-    let other = device.render_variant(state_id, [1, 1 << 2]).unwrap();
+    let other = device
+        .render_variant(state_id, [1, 1 << 2], PrimitiveTopologyClass::Unspecified)
+        .unwrap();
     assert!(other != variant && other != base);
     assert_eq!(device.compiler.compiled.len(), compiled + 4);
     device.destroy_render_pipeline(id).unwrap();

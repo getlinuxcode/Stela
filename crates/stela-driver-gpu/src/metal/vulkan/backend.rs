@@ -444,7 +444,12 @@ pub struct Requirement {
 
 /// The features the binding ABI, dynamic state model and synchronization
 /// rely on; a device missing any is refused rather than half-supported.
-pub fn requirements(features: &Features) -> [Requirement; 20] {
+/// Without `dynamicPrimitiveTopologyUnrestricted`, pipelines of an
+/// unspecified topology class compile a variant per class instead
+/// ([`RenderPipelinePlan::topology_variants`]).
+///
+/// [`RenderPipelinePlan::topology_variants`]: crate::metal::pipeline::RenderPipelinePlan::topology_variants
+pub fn requirements(features: &Features) -> [Requirement; 19] {
     let requirement = |name, present| Requirement { name, present };
     [
         requirement("bufferDeviceAddress", features.buffer_device_address),
@@ -494,10 +499,6 @@ pub fn requirements(features: &Features) -> [Requirement; 20] {
         requirement(
             "dynamicRenderingUnusedAttachments",
             features.dynamic_rendering_unused_attachments,
-        ),
-        requirement(
-            "dynamicPrimitiveTopologyUnrestricted",
-            features.dynamic_primitive_topology_unrestricted,
         ),
         requirement("hostQueryReset", features.host_query_reset),
     ]

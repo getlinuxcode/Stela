@@ -40,7 +40,7 @@ pub enum Outcome {
 pub struct Probed {
     pub snapshot: PhysicalDevice,
     /// The features the backend refuses a device without.
-    pub requirements: [Requirement; 20],
+    pub requirements: [Requirement; 19],
 }
 
 impl Probed {
