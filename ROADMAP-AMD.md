@@ -47,6 +47,22 @@ sudo xtask/scripts/vfio-gpu.sh run --stop-desktop --seconds 1800 -- \
 - **Le bug de réinitialisation des Radeon** : la Navi 48 se réinitialise mal en VFIO. Le script laisse amdgpu prendre la carte au démarrage et ne la détache qu'au moment de l'essai, comme le recommandent les retours d'expérience. Il ne la réserve jamais à vfio-pci dès le démarrage. Le script désactive aussi la réinitialisation FLR (`reset_method` vide), et QEMU réinitialise alors le slot. Ce choix est à valider sur la Navi 48 : certains utilisateurs ont dû interdire aussi la réinitialisation du bus. Un pilote amdgpu en cours de mise au point laissera parfois la carte dans un état que seul un redémarrage de l'hôte répare.
 - Activer l'IOMMU (`amd_iommu=on`, souvent actif par défaut) et la Resizable BAR dans le firmware de la carte mère.
 
+## Où on en est (15 novembre 2026)
+
+Fait depuis Windows, sans la carte :
+
+- Fork `getmowbot/Stela` : les patchs J0 et J2, `vfio-gpu.sh` et cette feuille de route sont dans `main`. Le remote `upstream` pointe sur `tylertms/Stela`, avec `git rerere` activé dans le clone Windows. À refaire dans chaque nouveau clone.
+- `amd-ci.yml` passe sur GitHub : rustfmt, clippy et tests de `stela-driver-gpu`, `stela-boot-core` et `stela-amd-host`. Le code AMD compile, mais n'a encore jamais tourné sur la carte.
+- `amd-sync-upstream.yml` tourne chaque jour à 4 h 17 UTC. GitHub Actions a le droit d'ouvrir des PR sur le fork. En cas de conflit, la fusion se fait à la main dans `sync/upstream`.
+- Les commits du fork portent l'identité `Stela contributor <contributor@example.invalid>`, comme les patchs.
+
+À faire sous Linux, dans cet ordre :
+
+1. Préparer le clone : `git remote add upstream https://github.com/tylertms/Stela.git`, puis `git config rerere.enabled true`. Vérifier le noyau (6.12 ou plus récent), que la carte est sous amdgpu, et que Mesa fournit RADV (`vulkaninfo --summary`).
+2. J2 : lancer `cargo run -p stela-amd-host --release`. Si d'autres pilotes Vulkan sont installés, préfixer la commande de `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json`. Archiver la sortie complète dans `docs/amd/qualification.md`, puis traiter chaque manque (voir J2).
+3. J1, dernier point : `xtask/scripts/vfio-gpu.sh status`, puis un premier essai en VM avec la carte prêtée (commande dans « Développement en VM »). Noter combien d'essais d'affilée passent sans redémarrer l'hôte.
+4. J3 : construire le compilateur avec la cible AMD (`cargo xtask gpu fetch`, Mesa). La sonde AIR→ACO existe déjà dans `crates/stela-driver-gpu/src/amd/tests/air_aco.c` et se construit avec Meson (`src/compiler/meson.build`).
+
 ## Jalons
 
 ### J0 : Fondations ✅
@@ -59,8 +75,8 @@ sudo xtask/scripts/vfio-gpu.sh run --stop-desktop --seconds 1800 -- \
 
 ### J1 : Infrastructure du fork
 
-- [x] Créer le fork et y appliquer les patchs J0 et J2 (branche `amd/j0-j2`).
-- [ ] Workflow GitHub Actions quotidien (`amd-sync-upstream.yml`, écrit, pas encore lancé) : merge de `upstream/main` dans `sync/upstream`, tests, puis PR automatique si tout passe.
+- [x] Créer le fork et y appliquer les patchs J0 et J2 (fusionnés dans `main`).
+- [ ] Workflow GitHub Actions quotidien (`amd-sync-upstream.yml`, en place et lancé une fois sans rien à fusionner ; reste à voir une vraie fusion passer) : merge de `upstream/main` dans `sync/upstream`, tests, puis PR automatique si tout passe.
 - [x] CI propre au fork (`amd-ci.yml`) : `cargo test` sur `stela-driver-gpu` (fonctionnalités `metal`, `metal-vulkan`), `stela-boot-core` et `stela-amd-host`, plus clippy et rustfmt.
 - [x] `vfio-gpu.sh` sait prêter une Radeon RDNA 4 à la VM.
 - [ ] Premier lancement de Stela en VM avec la 9070 XT prêtée : l'écran de démarrage nomme la carte et la rend proprement à la fin. Mesurer comment la réinitialisation se comporte sur plusieurs essais d'affilée.
