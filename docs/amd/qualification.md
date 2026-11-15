@@ -22,9 +22,9 @@ cargo build -p stela-amd-host --release
 VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.json ./target/release/stela-amd-host
 ```
 
-Code de sortie : 1, parce que la carte n'est pas encore admise.
+Code de sortie : 1, parce que la carte n'était pas encore admise.
 
-## Sortie
+## Première sortie
 
 ```text
 WARNING: radv is not a conformant Vulkan implementation, testing use only.
@@ -55,21 +55,39 @@ RESULT: no AMD GPU qualifies yet; the lines above say why.
 
 Ce qui est atteint :
 
-- 19 des 20 fonctions requises sont présentes, et l'import dma-buf aussi.
+- Avant le correctif ci-dessous, 19 des 20 fonctions requises étaient présentes, et l'import dma-buf aussi.
 - La table `amdgpu_chip` reconnaît bien la carte (GC 12.0.1, Navi 48, PCIe 5.0 x16).
 - Metal3 et Apple7 sont atteints dès maintenant. C'est l'objectif du jalon J2.
 - Les 16 Gio de VRAM sont entièrement accessibles au processeur, grâce à la Resizable BAR.
 
-### Le seul blocage : `dynamicPrimitiveTopologyUnrestricted`
+### Le blocage `dynamicPrimitiveTopologyUnrestricted`, levé
 
-RADV renvoie `false` pour cette propriété de `VK_EXT_extended_dynamic_state3`. Le backend exige qu'elle soit vraie : `crates/stela-driver-gpu/src/metal/vulkan/backend.rs` (liste des `requirement`).
+RADV renvoie `false` pour cette propriété de `VK_EXT_extended_dynamic_state3`. Le backend l'exigeait. Sans elle, Vulkan ne change la topologie d'un dessin qu'à l'intérieur de la classe (points, lignes ou triangles) avec laquelle le pipeline a été créé.
 
-Stela crée chaque pipeline avec la topologie de sa classe Metal (`class_topology` dans `metal/pipeline.rs`), puis fixe la topologie exacte au moment du dessin. Tant qu'un dessin reste dans la classe du pipeline (liste ou bande de triangles pour un pipeline de triangles), le Vulkan standard le permet sans cette propriété. Le problème vient de la classe `Unspecified` : le pipeline est créé en `TriangleList`, alors que Metal autorise ensuite des points ou des lignes.
+Stela crée chaque pipeline avec la topologie de sa classe Metal (`class_topology` dans `metal/pipeline.rs`), puis fixe la topologie exacte au moment du dessin. Le seul cas qui sort de la classe est un pipeline dont la classe n'est pas précisée (`MTLPrimitiveTopologyClassUnspecified`, la valeur par défaut sous macOS). Stela le crée en `TriangleList`, alors que Metal permet ensuite d'y dessiner des points ou des lignes.
 
-Il reste deux pistes, à trancher dans la suite de J2 :
+Le correctif :
 
-1. Côté Stela : rendre l'exigence conditionnelle. Sans la propriété, créer une variante du pipeline par classe de topologie pour les pipelines `Unspecified`, à la demande au moment du dessin.
-2. Côté RADV : vérifier si une version plus récente de Mesa l'expose sur GFX12, où le matériel fixe la topologie dynamiquement.
+- `dynamicPrimitiveTopologyUnrestricted` ne fait plus partie des exigences (`vulkan/backend.rs`, 19 fonctions requises au lieu de 20).
+- Quand la propriété manque, un pipeline de classe non précisée est marqué `topology_variants` (`RenderPipelinePlan`).
+- Un dessin de points ou de lignes sur ce pipeline lie une variante créée avec sa classe. Les variantes sont compilées à la première utilisation et gardées par classe, avec le mécanisme qui sert déjà aux échantillonneurs bicubiques (`Device::render_variant`, `Resolver::bicubic_render_pipeline`). Les dessins de triangles gardent le pipeline d'origine.
+- Limite connue : les commandes encodées par le GPU (indirect command buffers) ne lient pas de variantes. Ces pipelines ne leur sont donc pas proposés : `supportIndirectCommandBuffers` y est sans effet, et les exécuter depuis un indirect command buffer donne une erreur explicite. Si macOS en a besoin, il faudra un jeu d'exécution par classe de topologie.
+- Sur NVIDIA, où la propriété est présente, rien ne change.
+
+Sortie de `stela-amd-host` après le correctif :
+
+```text
+Vulkan device 0: AMD Radeon RX 9070 XT (RADV GFX1201) (vendor 1002, device 7550)
+  driver: MesaRadv, Vulkan 1.4.318
+  memory: 16304 MiB device-local, 16304 MiB reached by the CPU
+  backend requirements: all 19 present
+  primitive topology: restricted to the pipeline's class; point and line draws of unspecified pipelines compile a variant, and GPU-encoded commands cannot switch to those pipelines
+  dma-buf import: yes
+  ...
+RESULT: an AMD GPU qualifies for Stela's Metal device over RADV.
+```
+
+Code de sortie : 0.
 
 ### Les manques Metal
 

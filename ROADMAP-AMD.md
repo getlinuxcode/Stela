@@ -59,12 +59,12 @@ Fait depuis Windows, sans la carte :
 Fait sous Linux (Ubuntu 24.04, noyau 6.14, Mesa 25.2.8) :
 
 - Le clone Linux a son remote `upstream`, `git rerere` activé et l'identité des commits du fork. Rust 1.99.1 est installé par rustup.
-- J2 : `stela-amd-host` a tourné sur la 9070 XT, et sa sortie est archivée dans `docs/amd/qualification.md`. 19 fonctions requises sur 20 sont présentes, l'import dma-buf aussi, et Metal3 + Apple7 sont atteints. Seul manque : `dynamicPrimitiveTopologyUnrestricted`, que RADV ne fournit pas.
+- J2 : `stela-amd-host` a tourné sur la 9070 XT, et sa sortie est archivée dans `docs/amd/qualification.md`. Seul manque au départ : `dynamicPrimitiveTopologyUnrestricted`, que RADV ne fournit pas. Ce n'est plus une exigence : sans cette propriété, les pipelines Metal sans classe de topologie compilent une variante pour les points et une pour les lignes. **La carte est maintenant admise** (code de sortie 0), avec l'import dma-buf, Metal3 et Apple7. Limite : ces pipelines ne sont pas proposés aux indirect command buffers.
 - J1 : `vfio-gpu.sh status` reconnaît la carte (IOMMU et Resizable BAR actifs, groupes propres). Il n'y a pas d'autre sortie d'affichage : l'écran est branché sur la 9070 XT et le processeur n'a pas de puce graphique active.
 
 À faire ensuite, dans cet ordre :
 
-1. J2 : lever le blocage `dynamicPrimitiveTopologyUnrestricted` (pistes dans `docs/amd/qualification.md`), puis relancer `stela-amd-host`.
+1. J2 : examiner les manques Metal attribués au pilote (formats 4:2:2, textures sparse multi-échantillonnées) et proposer à upstream le correctif sur la topologie, qui sert à tout pilote sans cette propriété.
 2. J1, dernier point : brancher l'écran sur la carte mère, ou suivre la machine à distance, avant le premier essai en VM. Avec `--stop-desktop`, le bureau Linux s'arrête pendant l'essai. Noter ensuite combien d'essais d'affilée passent sans redémarrer l'hôte.
 3. J3 : construire le compilateur avec la cible AMD (`cargo xtask gpu fetch`, Mesa). La sonde AIR→ACO existe déjà dans `crates/stela-driver-gpu/src/amd/tests/air_aco.c` et se construit avec Meson (`src/compiler/meson.build`).
 
@@ -93,10 +93,11 @@ Fait sous Linux (Ubuntu 24.04, noyau 6.14, Mesa 25.2.8) :
 - [x] `metal::native::survey` : examine chaque périphérique Vulkan comme le ferait le backend, sans le créer.
 - [x] `stela-amd-host` : lit la version du cœur graphique et le lien PCIe dans sysfs, admet la carte et calcule le profil Metal (familles de GPU, et ce qui manque avec sa cause).
 - [x] Lancer l'outil sur la 9070 XT (Linux 6.12+, Mesa récent) et archiver sa sortie dans `docs/amd/qualification.md`.
-- [ ] Traiter chaque manque attribué au pilote : réglage Stela, ou limite connue de RADV.
+- [x] Lever le blocage `dynamicPrimitiveTopologyUnrestricted` : variantes de pipeline par classe de topologie quand le pilote ne fournit pas la propriété.
+- [ ] Traiter chaque manque Metal attribué au pilote : réglage Stela, ou limite connue de RADV.
 - [ ] Remplacer les alignements estimés (256 octets) par les valeurs que RADV renvoie réellement.
 
-**Terminé quand** les 20 fonctions requises sont présentes, l'import dma-buf aussi, et Metal3 + Apple7 sont atteints sur la vraie carte.
+**Terminé quand** les fonctions requises sont présentes (19 depuis le correctif sur la topologie), l'import dma-buf aussi, et Metal3 + Apple7 sont atteints sur la vraie carte. C'est atteint depuis le 15 novembre 2026. Restent les manques Metal et les alignements.
 
 ### J3 : Compiler les shaders de macOS pour gfx1201
 
