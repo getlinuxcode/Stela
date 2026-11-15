@@ -56,12 +56,17 @@ Fait depuis Windows, sans la carte :
 - `amd-sync-upstream.yml` tourne chaque jour à 4 h 17 UTC. GitHub Actions a le droit d'ouvrir des PR sur le fork. En cas de conflit, la fusion se fait à la main dans `sync/upstream`.
 - Les commits du fork portent l'identité `Stela contributor <contributor@example.invalid>`, comme les patchs.
 
-À faire sous Linux, dans cet ordre :
+Fait sous Linux (Ubuntu 24.04, noyau 6.14, Mesa 25.2.8) :
 
-1. Préparer le clone : `git remote add upstream https://github.com/tylertms/Stela.git`, puis `git config rerere.enabled true`. Vérifier le noyau (6.12 ou plus récent), que la carte est sous amdgpu, et que Mesa fournit RADV (`vulkaninfo --summary`).
-2. J2 : lancer `cargo run -p stela-amd-host --release`. Si d'autres pilotes Vulkan sont installés, préfixer la commande de `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json`. Archiver la sortie complète dans `docs/amd/qualification.md`, puis traiter chaque manque (voir J2).
-3. J1, dernier point : `xtask/scripts/vfio-gpu.sh status`, puis un premier essai en VM avec la carte prêtée (commande dans « Développement en VM »). Noter combien d'essais d'affilée passent sans redémarrer l'hôte.
-4. J3 : construire le compilateur avec la cible AMD (`cargo xtask gpu fetch`, Mesa). La sonde AIR→ACO existe déjà dans `crates/stela-driver-gpu/src/amd/tests/air_aco.c` et se construit avec Meson (`src/compiler/meson.build`).
+- Le clone Linux a son remote `upstream`, `git rerere` activé et l'identité des commits du fork. Rust 1.99.1 est installé par rustup.
+- J2 : `stela-amd-host` a tourné sur la 9070 XT, et sa sortie est archivée dans `docs/amd/qualification.md`. 19 fonctions requises sur 20 sont présentes, l'import dma-buf aussi, et Metal3 + Apple7 sont atteints. Seul manque : `dynamicPrimitiveTopologyUnrestricted`, que RADV ne fournit pas.
+- J1 : `vfio-gpu.sh status` reconnaît la carte (IOMMU et Resizable BAR actifs, groupes propres). Il n'y a pas d'autre sortie d'affichage : l'écran est branché sur la 9070 XT et le processeur n'a pas de puce graphique active.
+
+À faire ensuite, dans cet ordre :
+
+1. J2 : lever le blocage `dynamicPrimitiveTopologyUnrestricted` (pistes dans `docs/amd/qualification.md`), puis relancer `stela-amd-host`.
+2. J1, dernier point : brancher l'écran sur la carte mère, ou suivre la machine à distance, avant le premier essai en VM. Avec `--stop-desktop`, le bureau Linux s'arrête pendant l'essai. Noter ensuite combien d'essais d'affilée passent sans redémarrer l'hôte.
+3. J3 : construire le compilateur avec la cible AMD (`cargo xtask gpu fetch`, Mesa). La sonde AIR→ACO existe déjà dans `crates/stela-driver-gpu/src/amd/tests/air_aco.c` et se construit avec Meson (`src/compiler/meson.build`).
 
 ## Jalons
 
@@ -87,7 +92,7 @@ Fait depuis Windows, sans la carte :
 
 - [x] `metal::native::survey` : examine chaque périphérique Vulkan comme le ferait le backend, sans le créer.
 - [x] `stela-amd-host` : lit la version du cœur graphique et le lien PCIe dans sysfs, admet la carte et calcule le profil Metal (familles de GPU, et ce qui manque avec sa cause).
-- [ ] Lancer l'outil sur la 9070 XT (Linux 6.12+, Mesa récent) et archiver sa sortie dans `docs/amd/qualification.md`.
+- [x] Lancer l'outil sur la 9070 XT (Linux 6.12+, Mesa récent) et archiver sa sortie dans `docs/amd/qualification.md`.
 - [ ] Traiter chaque manque attribué au pilote : réglage Stela, ou limite connue de RADV.
 - [ ] Remplacer les alignements estimés (256 octets) par les valeurs que RADV renvoie réellement.
 
