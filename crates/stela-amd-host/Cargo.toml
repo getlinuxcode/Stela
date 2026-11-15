@@ -1,0 +1,21 @@
+[package]
+name = "stela-amd-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Qualifies an AMD GPU and RADV for Stela's Metal device on a Linux host"
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "stela-amd-host"
+path = "src/main.rs"
+
+[dependencies]
+stela-driver-gpu = { path = "../stela-driver-gpu", features = ["metal-vulkan"] }
+# The system's Vulkan loader, which reaches RADV (`libvulkan.so.1`).
+ash = { version = "0.38", default-features = false, features = ["loaded", "std"] }
+
+[lints]
+workspace = true

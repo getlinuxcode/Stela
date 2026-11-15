@@ -100,3 +100,36 @@ fn alignments_are_multiples_of_every_rdna_linear_pitch() {
         assert_eq!(LINEAR_ROW_ALIGNMENT % pitch, 0);
     }
 }
+
+/// The derivation is vendor-neutral: over a driver that reports what NVK
+/// reports, the Navi 48 platform reaches the same Metal 3 and Apple7
+/// families. RADV's own snapshot is what `stela-amd-host` checks on
+/// hardware.
+#[test]
+fn an_nvk_like_snapshot_on_navi48_reaches_metal3_and_apple7() {
+    use crate::metal::{
+        abi::GpuFamily,
+        capabilities::{ApiFeatures, Capabilities, ShaderFeatures},
+    };
+    let mut snapshot = nvk(&crate::metal::nvidia::CHIPS[0], 16 << 30);
+    snapshot.identity = radv_identity();
+    let capabilities = Capabilities::derive(
+        &snapshot,
+        &navi48().platform(Attachment {
+            link: GEN5_X16,
+            external: false,
+            location_number: 0,
+        }),
+        ShaderFeatures::KNOWN,
+        ApiFeatures::KNOWN,
+    );
+    assert_eq!(capabilities.architecture, "GFX1201");
+    for family in [
+        GpuFamily::Mac2,
+        GpuFamily::Common3,
+        GpuFamily::Apple7,
+        GpuFamily::Metal3,
+    ] {
+        assert!(capabilities.supports_family(family), "{family:?}");
+    }
+}

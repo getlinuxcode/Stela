@@ -26,6 +26,7 @@ pub mod pipeline_store;
 mod premade;
 mod record;
 mod sparse;
+pub mod survey;
 #[cfg(test)]
 mod tests;
 mod zero;
