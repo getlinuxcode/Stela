@@ -10,6 +10,7 @@
 //! Encoder state is the command buffer's: one encoder is active at a time,
 //! as in Metal. Its operations are in [`render`], [`compute`] and [`blit`].
 use super::{
+    abi::PrimitiveTopologyClass,
     binding::{
         ArgumentTable, BufferBinding, PassImageblock, PassSamples, PushConstants, ResourceId,
     },
@@ -148,11 +149,14 @@ pub trait Resolver: ChunkSource {
 
     /// The variant of a vertex pipeline whose vertex and fragment stages
     /// filter the samplers at `bicubic` bicubically
-    /// ([`RenderPipelineState::bicubic`]), compiled on first use.
+    /// ([`RenderPipelineState::bicubic`]), created for draws of `topology`
+    /// when it is a point or line class the pipeline needs a variant for
+    /// ([`RenderPipelinePlan::topology_variants`]), compiled on first use.
     fn bicubic_render_pipeline(
         &mut self,
         state: &RenderPipelineState,
         bicubic: [u32; 2],
+        topology: PrimitiveTopologyClass,
     ) -> Result<Pipeline>;
 
     /// A reset query pool of `query_type` and its query count; pipeline
