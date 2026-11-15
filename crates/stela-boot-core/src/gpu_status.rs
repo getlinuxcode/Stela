@@ -220,7 +220,10 @@ pub fn bar_sizes(bars: &[(usize, u64)]) -> String {
 pub fn adapter(adapter: &Adapter) -> String {
     let maker = match adapter.vendor {
         Vendor::Nvidia => String::from("NVIDIA"),
-        Vendor::Amd => String::from("AMD"),
+        Vendor::Amd => match adapter.amd_chip() {
+            Some(chip) => format!("AMD {} ({})", chip.die, chip.products),
+            None => String::from("AMD"),
+        },
         Vendor::Intel => String::from("Intel"),
         Vendor::Other(id) => format!("PCI vendor {id:04x}"),
     };
@@ -325,6 +328,13 @@ mod tests {
              ported to Stela"
         );
         assert!(adapter(&at(1, Vendor::Other(0x1af4), 0x1050)).contains("PCI vendor 1af4"));
+        let navi48 = at(3, Vendor::Amd, 0x7550);
+        assert_eq!(
+            unused(&navi48),
+            "the AMD Navi 48 (Radeon RX 9070 series) display adapter at 0000:03:00.0 (device \
+             7550) is not used: this RDNA 4 Radeon is recognized, but amdgpu and RADV are not \
+             ported to Stela yet"
+        );
     }
 
     #[test]
