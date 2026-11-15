@@ -21,7 +21,31 @@ Sans périphérique Metal, macOS ne démarre pas sous Stela : WindowServer s'arr
 - Le code AMD vit dans des fichiers à lui (`amdgpu_chip.rs`, `metal/amd/`, `stela-amd-host/`, et plus tard `amdgpu.rs`, `xtask/src/gpu/radv.rs`, `third_party/patches/amdgpu/`). On touche le moins possible aux fichiers d'upstream.
 - `upstream/main` est fusionné régulièrement par merge, jamais par rebase, avec `git rerere` activé.
 - Les correctifs qui ne concernent pas AMD repartent vers upstream sous forme de petites PR.
-- Matériel de référence : une seule RX 9070 XT, sans carte NVIDIA. Rien ne s'affiche avant la fin du jalon 5.
+- Matériel de référence : une seule RX 9070 XT, sans carte NVIDIA. macOS ne démarre pas avant le jalon 7.
+
+## Développement en VM
+
+Tout le développement se fait depuis Linux, sans redémarrer le PC à chaque essai :
+
+| Jalons | Où |
+| --- | --- |
+| J2 à J5 | Linux natif, la carte sous amdgpu + RADV |
+| J6 et J7 | Stela dans une VM QEMU/KVM, la carte prêtée par VFIO |
+
+Upstream sait déjà le faire : `cargo xtask boot run --kvm --vfio-gpu`. La VM garde un écran VGA émulé pour le firmware, donc l'écran de démarrage de Stela et ses messages restent visibles même quand la Radeon n'affiche rien. Les journaux arrivent directement sous Linux.
+
+```sh
+# État de la carte : pilote, groupe IOMMU, autres sorties d'affichage
+xtask/scripts/vfio-gpu.sh status
+# Un essai : la carte quitte amdgpu, va dans la VM, puis revient
+sudo xtask/scripts/vfio-gpu.sh run --stop-desktop --seconds 1800 -- \
+  cargo xtask boot run --kvm --vfio-gpu 0000:03:00.0 --usb-image stick.img
+```
+
+- `vfio-gpu.sh` choisit une NVIDIA, sinon une Radeon RDNA 4 (0x7550, 0x7590). Il n'utilise jamais la puce graphique intégrée d'un Ryzen. `STELA_VFIO_GPU=0000:03:00.0` force une carte précise.
+- **Affichage de l'hôte** : si l'écran est branché sur la 9070 XT, `--stop-desktop` coupe le bureau Linux pendant l'essai. Il vaut mieux brancher l'écran sur la carte mère (puce graphique intégrée du processeur) et laisser la 9070 XT sans écran, ou suivre la VM à distance (VNC, SSH).
+- **Le bug de réinitialisation des Radeon** : la Navi 48 se réinitialise mal en VFIO. Le script laisse amdgpu prendre la carte au démarrage et ne la détache qu'au moment de l'essai, comme le recommandent les retours d'expérience. Il ne la réserve jamais à vfio-pci dès le démarrage. Le script désactive aussi la réinitialisation FLR (`reset_method` vide), et QEMU réinitialise alors le slot. Ce choix est à valider sur la Navi 48 : certains utilisateurs ont dû interdire aussi la réinitialisation du bus. Un pilote amdgpu en cours de mise au point laissera parfois la carte dans un état que seul un redémarrage de l'hôte répare.
+- Activer l'IOMMU (`amd_iommu=on`, souvent actif par défaut) et la Resizable BAR dans le firmware de la carte mère.
 
 ## Jalons
 
@@ -38,6 +62,8 @@ Sans périphérique Metal, macOS ne démarre pas sous Stela : WindowServer s'arr
 - [ ] Créer le fork et y appliquer les patchs J0 et J2.
 - [ ] Workflow GitHub Actions quotidien : merge de `upstream/main` dans `sync/upstream`, tests, puis PR automatique si tout passe.
 - [ ] CI propre au fork : `cargo test` sur `stela-driver-gpu` (fonctionnalités `metal`, `metal-vulkan`), `stela-boot-core` et `stela-amd-host`, plus clippy et rustfmt.
+- [x] `vfio-gpu.sh` sait prêter une Radeon RDNA 4 à la VM.
+- [ ] Premier lancement de Stela en VM avec la 9070 XT prêtée : l'écran de démarrage nomme la carte et la rend proprement à la fin. Mesurer comment la réinitialisation se comporte sur plusieurs essais d'affilée.
 
 **Terminé quand** une synchronisation avec upstream passe la CI sans intervention.
 
@@ -83,7 +109,7 @@ Sans GPU nécessaire.
 
 ### J6 : Portage d'amdgpu dans Stela
 
-Le plus gros chantier. Mise au point sur la machine, avec le journal de démarrage sur la clé USB.
+Le plus gros chantier. Mise au point dans la VM avec la carte prêtée (voir « Développement en VM »), puis vérification sur la machine réelle avec le journal de démarrage sur la clé USB.
 
 - [ ] Ajouter `drivers/gpu/drm/amd/` (amdgpu, display/DC, pm/swsmu, include) à `third_party/linux.sparse`, sans amdkfd.
 - [ ] Compiler amdgpu sur `stela-linux` et écrire les patches de compatibilité nécessaires (`third_party/patches/amdgpu/`).
@@ -100,9 +126,10 @@ Le plus gros chantier. Mise au point sur la machine, avec le journal de démarra
 - [ ] `xtask/src/gpu/radv.rs`, sur le modèle de `nvk.rs` : compiler Mesa avec `-Dvulkan-drivers=amd` pour l'image UEFI.
 - [ ] Couche de liaison entre RADV et amdgpu dans Stela : adapter libdrm_amdgpu, ou écrire une liaison propre comme celle de nouveau.
 - [ ] Brancher `metal::amd::open` au démarrage.
-- [ ] Premier démarrage de macOS 27 sur la 9070 XT, puis l'assistant de configuration.
+- [ ] Premier démarrage de macOS 27 en VM, avec la 9070 XT prêtée, puis l'assistant de configuration.
+- [ ] Le même démarrage sur la machine réelle.
 
-**Terminé quand** l'assistant de configuration est terminé et le bureau est fluide sur la 9070 XT.
+**Terminé quand** l'assistant de configuration est terminé et le bureau est fluide sur la 9070 XT, en VM puis sur la machine réelle.
 
 ### J8 : Stabilisation et extension
 
@@ -120,7 +147,8 @@ Le plus gros chantier. Mise au point sur la machine, avec le journal de démarra
 | Upstream change très vite (des centaines de commits par jour) | Conflits fréquents | Isoler le code AMD, synchronisation automatique quotidienne |
 | Aucun enregistrement NVIDIA disponible pour J5 | Pas de preuve avant le premier démarrage | J4 et la suite Metal couvrent déjà l'essentiel ; demander tôt sur le Discord |
 | Firmware PSP signé qui refuse de se charger hors Linux | J6 bloqué | Reproduire exactement la séquence d'amdgpu ; vérifier les firmwares contre leurs empreintes |
-| Pas de carte NVIDIA pour comparer sur la même machine | Débogage à l'aveugle en J6-J7 | Journal de démarrage détaillé ; un câble série ou un debug réseau si besoin |
+| Pas de carte NVIDIA pour comparer sur la même machine | Débogage à l'aveugle en J6-J7 | Développement en VM avec l'écran VGA émulé et les journaux sous Linux |
+| Le bug de réinitialisation des Radeon en VFIO | Hôte figé ou redémarré pendant J6-J7 | Laisser amdgpu prendre la carte au démarrage ; tester les méthodes de réinitialisation ; accepter quelques redémarrages |
 
 ## Questions ouvertes
 

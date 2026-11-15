@@ -15,11 +15,16 @@
 #   sudo systemd-run --unit=stela-vfio --collect xtask/scripts/vfio-gpu.sh \
 #     run --stop-desktop --seconds 1800 -- COMMAND...
 #
-# STELA_VFIO_GPU names the card, by default the first NVIDIA display function.
+# STELA_VFIO_GPU names the card, by default the first NVIDIA display function,
+# else the first RDNA 4 Radeon (Navi 48 0x7550, Navi 44 0x7590; an APU's own
+# AMD display function is never chosen). A Radeon's framebuffer consoles are
+# released before amdgpu lets it go, and taken back with it.
 set -euo pipefail
 
 die() { echo "vfio-gpu: $*" >&2; exit 1; }
-devices=/sys/bus/pci/devices
+devices=${STELA_VFIO_SYSFS:-/sys/bus/pci/devices}
+# Discrete RDNA 4 boards (crates/stela-driver-gpu/src/amdgpu_chip.rs).
+amd_cards=(0x7550 0x7590)
 
 gpu() {
   if [[ -n ${STELA_VFIO_GPU:-} ]]; then
@@ -32,7 +37,13 @@ gpu() {
     basename "$device"
     return
   done
-  die "no NVIDIA display function"
+  for device in "$devices"/*; do
+    [[ $(<"$device/vendor") == 0x1002 && $(<"$device/class") == 0x03* ]] || continue
+    [[ " ${amd_cards[*]} " == *" $(<"$device/device") "* ]] || continue
+    basename "$device"
+    return
+  done
+  die "no NVIDIA or RDNA 4 Radeon display function"
 }
 
 # The functions of the card's slot, which go to the guest together.
@@ -95,15 +106,20 @@ release() {
   echo >"$devices/$function/driver_override"
 }
 
-# Stop what holds an NVIDIA card: its services, consoles and modules.
-unload_nvidia() {
+# Release the framebuffer consoles, which hold the card's driver.
+release_consoles() {
   local console
-  systemctl stop nvidia-persistenced.service 2>/dev/null || true
   for console in /sys/class/vtconsole/vtcon*; do
     if grep -q 'frame buffer' "$console/name"; then
       echo 0 >"$console/bind"
     fi
   done
+}
+
+# Stop what holds an NVIDIA card: its services, consoles and modules.
+unload_nvidia() {
+  systemctl stop nvidia-persistenced.service 2>/dev/null || true
+  release_consoles
   local module
   for module in nvidia_uvm nvidia_drm nvidia_modeset nvidia; do
     if [[ -d /sys/module/$module ]]; then
@@ -161,10 +177,14 @@ run() {
     stopped=1
     sleep 3
   fi
-  if [[ $(driver "$card") == nvidia ]]; then
-    nvidia=1
-    unload_nvidia
-  fi
+  case $(driver "$card") in
+    nvidia) nvidia=1; unload_nvidia ;;
+    # amdgpu stays loaded for the host's other GPUs; only this card leaves it.
+    # The card is bound to amdgpu when the run starts and goes back to it, as
+    # Navi 48 passthrough reports recommend: an early vfio-pci binding meets
+    # the Radeon reset bug.
+    amdgpu) release_consoles ;;
+  esac
   local function
   for function in "${members[@]}"; do bind "$function"; done
   chown "$owner" "/dev/vfio/$group"
