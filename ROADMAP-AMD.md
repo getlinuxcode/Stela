@@ -47,7 +47,7 @@ sudo xtask/scripts/vfio-gpu.sh run --stop-desktop --seconds 1800 -- \
 - **Le bug de réinitialisation des Radeon** : la Navi 48 se réinitialise mal en VFIO. Le script laisse amdgpu prendre la carte au démarrage et ne la détache qu'au moment de l'essai, comme le recommandent les retours d'expérience. Il ne la réserve jamais à vfio-pci dès le démarrage. Le script désactive aussi la réinitialisation FLR (`reset_method` vide), et QEMU réinitialise alors le slot. Ce choix est à valider sur la Navi 48 : certains utilisateurs ont dû interdire aussi la réinitialisation du bus. Un pilote amdgpu en cours de mise au point laissera parfois la carte dans un état que seul un redémarrage de l'hôte répare.
 - Activer l'IOMMU (`amd_iommu=on`, souvent actif par défaut) et la Resizable BAR dans le firmware de la carte mère.
 
-## Où on en est (15 novembre 2026)
+## Où on en est (16 novembre 2026)
 
 Fait depuis Windows, sans la carte :
 
@@ -62,11 +62,13 @@ Fait sous Linux (Ubuntu 24.04, noyau 6.14, Mesa 25.2.8) :
 - J2 : `stela-amd-host` a tourné sur la 9070 XT, et sa sortie est archivée dans `docs/amd/qualification.md`. Seul manque au départ : `dynamicPrimitiveTopologyUnrestricted`, que RADV ne fournit pas. Ce n'est plus une exigence : sans cette propriété, les pipelines Metal sans classe de topologie compilent une variante pour les points et une pour les lignes. **La carte est maintenant admise** (code de sortie 0), avec l'import dma-buf, Metal3 et Apple7. Limite : ces pipelines ne sont pas proposés aux indirect command buffers.
 - J1 : `vfio-gpu.sh status` reconnaît la carte (IOMMU et Resizable BAR actifs, groupes propres). Il n'y a pas d'autre sortie d'affichage : l'écran est branché sur la 9070 XT et le processeur n'a pas de puce graphique active.
 
+- J3 : les compilateurs de Stela sont construits avec la cible AMD et le frontal AIR (LLVM 23). La suite Metal tourne sur un Mac (M3 Pro, macOS 27.2.1) : 14 146 cas réussis, aucun échec. Les shaders de WindowServer, de CoreAnimation et de l'assistant de configuration compilent tous vers NIR pour gfx1201. Sur tout macOS, aucun refus n'est propre à AMD (`docs/amd/shaders.md`).
+
 À faire ensuite, dans cet ordre :
 
-1. J2 : les manques Metal sont examinés, et aucun ne se règle côté Stela. Le correctif sur la topologie est proposé à upstream ([tylertms/Stela#158](https://github.com/tylertms/Stela/pull/158)) : suivre la revue.
-2. J3 : `cargo xtask gpu fetch` s'arrête faute du paquet `python3.12-venv`. Une fois ce paquet installé, construire les compilateurs avec la cible AMD : `cargo xtask gpu compilers`, avec `--llvm-library` et `--llvm-config` pour le frontal AIR, qui demande LLVM 23. La sonde AIR→ACO existe déjà dans `crates/stela-driver-gpu/src/amd/tests/air_aco.c`.
-3. J3 : la suite `metal-suite offline` lit l'AIR qu'un Mac compile (`metal-suite mac`), et `coverage` lit les metallibs système d'un Mac. Sans Mac, il faudra les extraire d'une image de macOS 27.
+1. J2 : suivre la revue de la PR upstream sur la topologie ([tylertms/Stela#158](https://github.com/tylertms/Stela/pull/158)).
+2. Proposer à upstream les corrections d'outillage trouvées en J3 : `offline` et `stela_metal_corpus`, les archives minces, `libdl.a`, `libm.a`. Puis ouvrir des tickets pour les familles de refus du frontal AIR.
+3. J4 : ouvrir le vrai périphérique Metal sur RADV (`stela-amd-host --device`). C'est là que le NIR de J3 descendra jusqu'au code machine gfx1201.
 4. J1, dernier point : le Ryzen 5 5600X n'a pas de puce graphique, et la 9070 XT est la seule sortie d'affichage. Avant le premier essai en VM, il faut ajouter une petite carte graphique pour l'écran de Linux, ou lancer l'essai par SSH et suivre la VM par VNC. Avec `--stop-desktop`, le bureau Linux s'arrête pendant l'essai. Noter ensuite combien d'essais d'affilée passent sans redémarrer l'hôte.
 
 ## Jalons
@@ -101,16 +103,17 @@ Fait sous Linux (Ubuntu 24.04, noyau 6.14, Mesa 25.2.8) :
 
 **Terminé quand** les fonctions requises sont présentes (19 depuis le correctif sur la topologie), l'import dma-buf aussi, et Metal3 + Apple7 sont atteints sur la vraie carte. C'est atteint depuis le 15 novembre 2026. Restent les manques Metal et les alignements.
 
-### J3 : Compiler les shaders de macOS pour gfx1201
+### J3 : Compiler les shaders de macOS pour gfx1201 🟡
 
-Sans GPU nécessaire.
+Sans GPU nécessaire. Mesure et commandes dans `docs/amd/shaders.md`.
 
-- [ ] Ajouter la cible AMD gfx1201 à `cargo xtask gpu metal-suite offline`.
-- [ ] Étendre `coverage` à ce que le chemin ACO ne sait pas encore traduire.
-- [ ] Extraire de l'image macOS 27 les bibliothèques Metal de WindowServer, CoreAnimation, QuartzCore et de l'assistant de configuration.
-- [ ] Les compiler toutes pour gfx1201 et ouvrir un ticket pour chaque échec.
+- [x] Ajouter la cible AMD gfx1201 à `cargo xtask gpu metal-suite offline` : outil `stela_metal_corpus_amd`, option `--gpu`.
+- [x] Extraire les bibliothèques Metal de WindowServer (SkyLight), CoreAnimation (QuartzCore) et de l'assistant de configuration : `metal-suite coverage` les copie depuis un Mac sous macOS 27.2.1.
+- [x] Les compiler toutes pour gfx1201 (`xtask/scripts/amd-macos-shaders.py`). Le corpus du démarrage passe en entier, sauf le constructeur BVH du ray tracing et une archive de CoreImage assemblée à l'exécution. Sur tout macOS, aucun refus n'est propre à AMD : gfx1201 et NVIDIA refusent les mêmes 13 319 points d'entrée sur 57 401.
+- [ ] Ouvrir à upstream un ticket par famille de refus du frontal AIR commun (`air.signature`, bfloat, accès volatils, budget de métadonnées…).
+- [ ] Descendre jusqu'à ACO : compiler ce NIR en code machine gfx1201, et étendre `coverage` à ce que le chemin ACO ne sait pas encore traduire. C'est à faire avec RADV, en J4.
 
-**Terminé quand** tous les shaders de ce corpus compilent pour gfx1201.
+**Terminé quand** tous les shaders de ce corpus compilent pour gfx1201, jusqu'au code machine. Le niveau NIR est atteint pour le corpus du démarrage.
 
 ### J4 : La couche Metal de Stela tourne sur RADV sous Linux
 
