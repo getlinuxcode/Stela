@@ -9,7 +9,16 @@ use stela_driver_gpu::metal::error::{Error, Result};
 /// Whether this runner fills every argument buffer of `case`.
 pub fn supported(case: &Value) -> bool {
     const ARGUMENTS: [&str; 2] = ["buffer", "entries"];
-    const ENTRY: [&str; 4] = ["kind", "offset", "resource", "resource_offset"];
+    const ENTRY: [&str; 8] = [
+        "format",
+        "fragment",
+        "function",
+        "kind",
+        "offset",
+        "resource",
+        "resource_offset",
+        "vertex",
+    ];
     let only = |value: &Value, keys: &[&str]| {
         value
             .as_object()
@@ -19,7 +28,14 @@ pub fn supported(case: &Value) -> bool {
         only(a, &ARGUMENTS)
             && a["entries"].as_array().into_iter().flatten().all(|e| {
                 only(e, &ENTRY)
-                    && matches!(e["kind"].as_str(), Some("buffer" | "texture" | "sampler" | "icb"))
+                    && matches!(e["kind"].as_str(), Some(
+                            "buffer"
+                                | "texture"
+                                | "sampler"
+                                | "icb"
+                                | "compute_pipeline"
+                                | "render_pipeline"
+                        ))
             })
     })
 }
@@ -54,6 +70,17 @@ impl Runner<'_> {
                             .ok_or(Error::Invalid("an argument names no indirect command buffer"))?;
                         self.device.indirect_command_buffer_resource_id(id)?
                     }
+                    // Pipelines indirect commands set, by their resource IDs.
+                    Some("compute_pipeline") => {
+                        let library = case["library"].as_str().unwrap_or_default();
+                        let function = e["function"].as_str().unwrap_or_default();
+                        let pipeline = self.indirect_compute_pipeline(library, function)?;
+                        self.device.compute_pipeline_resource_id(pipeline)?
+                    }
+                    Some("render_pipeline") => {
+                        let pipeline = self.indirect_render_pipeline(case, e)?;
+                        self.device.render_pipeline_resource_id(pipeline)?
+                    }
                     _ => return Err(Error::Unsupported("an argument kind")),
                 };
                 let offset = e["offset"].as_u64().unwrap_or(0);
@@ -73,5 +100,74 @@ impl Runner<'_> {
             }
         }
         Ok(())
+    }
+}
+
+impl Runner<'_> {
+    /// A compute pipeline of `function` indirect commands can switch to.
+    fn indirect_compute_pipeline(
+        &mut self,
+        library: &str,
+        function: &str,
+    ) -> Result<stela_driver_gpu::metal::device::ComputePipelineId> {
+        use stela_driver_gpu::metal::device::pipelines::{
+            ComputePipelineRequest, LinkedFunctions, PipelineArchives,
+        };
+        let library = self.library(library)?;
+        let function = self.device.new_function(library, function, Some(&[]))?;
+        self.device.new_compute_pipeline(&ComputePipelineRequest {
+            compute_function: function,
+            threadgroup_size_is_multiple_of_thread_execution_width: false,
+            max_total_threads_per_threadgroup: 0,
+            stage_input: None,
+            linked_functions: LinkedFunctions::default(),
+            support_indirect_command_buffers: true,
+            archives: PipelineArchives::default(),
+        })
+    }
+
+    /// The render pipeline an argument entry names: its vertex and fragment
+    /// functions into one color attachment of its format.
+    fn indirect_render_pipeline(
+        &mut self,
+        case: &Value,
+        entry: &Value,
+    ) -> Result<stela_driver_gpu::metal::device::RenderPipelineId> {
+        use stela_driver_gpu::metal::{
+            abi::PrimitiveTopologyClass,
+            device::pipelines::{LinkedFunctions, PipelineArchives, RenderPipelineRequest},
+            pipeline::RenderTargets,
+            pixel_format::PixelFormat,
+        };
+        let library = self.library(case["library"].as_str().unwrap_or_default())?;
+        let vertex = self.device.new_function(
+            library,
+            entry["vertex"].as_str().unwrap_or_default(),
+            Some(&[]),
+        )?;
+        let fragment = self.device.new_function(
+            library,
+            entry["fragment"].as_str().unwrap_or_default(),
+            Some(&[]),
+        )?;
+        let mut targets = RenderTargets::default();
+        targets.color_attachments[0].pixel_format = Some(super::suite::named(
+            PixelFormat::ALL,
+            entry["format"].as_str().unwrap_or_default(),
+        )
+        .ok_or(Error::Unsupported("a pixel format this runner does not name"))?);
+        self.device.new_render_pipeline(&RenderPipelineRequest {
+            vertex_function: vertex,
+            fragment_function: Some(fragment),
+            vertex_descriptor: None,
+            targets,
+            input_primitive_topology: PrimitiveTopologyClass::Unspecified,
+            max_vertex_amplification_count: 1,
+            tessellation: Default::default(),
+            vertex_linked_functions: LinkedFunctions::default(),
+            fragment_linked_functions: LinkedFunctions::default(),
+            support_indirect_command_buffers: true,
+            archives: PipelineArchives::default(),
+        })
     }
 }

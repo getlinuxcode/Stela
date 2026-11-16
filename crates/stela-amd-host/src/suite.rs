@@ -64,7 +64,8 @@ const BASIC_CASE: [&str; 26] = [
 ];
 /// `storage` and `write_combined` change where the CPU reaches a buffer,
 /// not what it holds.
-const BASIC_BUFFER: [&str; 13] = [
+const BASIC_BUFFER: [&str; 14] = [
+    "untracked",
     "alias_of",
     "heap",
     "heap_offset",

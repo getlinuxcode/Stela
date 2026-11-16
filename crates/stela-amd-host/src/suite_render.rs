@@ -130,7 +130,8 @@ const STENCIL: [&str; 14] = [
     "texture",
     "write_mask",
 ];
-const BUFFER: [&str; 14] = [
+const BUFFER: [&str; 15] = [
+    "untracked",
     "alias_of",
     "heap",
     "heap_offset",

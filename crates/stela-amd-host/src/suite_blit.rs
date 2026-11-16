@@ -13,7 +13,10 @@ use stela_driver_gpu::metal::{
     error::{Error, Result},
 };
 
-const OPS: [&str; 12] = [
+const OPS: [&str; 15] = [
+    "copy_icb",
+    "optimize_icb",
+    "reset_icb",
     "buffer_to_texture",
     "buffer_to_texture_plane",
     "copy_buffer",
@@ -46,7 +49,8 @@ pub fn basic(case: &Value) -> bool {
         && only(
             case,
             &[
-                "blits", "buffers", "kind", "name", "outputs", "requires", "textures",
+                "blits", "buffers", "icbs", "kind", "library", "name", "outputs", "requires",
+                "textures",
             ],
         )
         && case["blits"].as_array().is_some_and(|ops| {
@@ -88,6 +92,39 @@ impl Runner<'_> {
     }
 
     fn blit(&mut self, op: &Value, held: &Held, commands: &mut CommandBuffer) -> Result<()> {
+        // The indirect command buffer blits, over a range of commands.
+        let icb = |key: &str| {
+            let name = op[key].as_str().unwrap_or_default();
+            held.icbs
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, id)| *id)
+                .ok_or(Error::Invalid("a blit names no indirect command buffer"))
+        };
+        let start = op["start"].as_u64().unwrap_or(0) as usize;
+        let range = start..start + op["count"].as_u64().unwrap_or(1) as usize;
+        match op["op"].as_str() {
+            Some("reset_icb") => {
+                return commands.reset_commands(&mut self.device.resolver(), icb("icb")?, range);
+            }
+            Some("optimize_icb") => {
+                return commands.optimize_indirect_commands(
+                    &mut self.device.resolver(),
+                    icb("icb")?,
+                    range,
+                );
+            }
+            Some("copy_icb") => {
+                return commands.copy_indirect_commands(
+                    &mut self.device.resolver(),
+                    icb("src")?,
+                    range,
+                    icb("dst")?,
+                    op["dst_start"].as_u64().unwrap_or(0) as usize,
+                );
+            }
+            _ => {}
+        }
         let number = |key: &str| op[key].as_u64().unwrap_or(0);
         let buffer = |key: &str| -> Result<_> {
             let name = op[key].as_str().unwrap_or_default();
