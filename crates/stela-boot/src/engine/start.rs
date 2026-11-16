@@ -2910,6 +2910,8 @@ fn start_devices(
             && !options.guest_network
             && translation_store.is_none()
             && fdr_partition.is_none()
+            // AMD fork: a GPU trial opens the host's devices, the GPU's too.
+            && !options.gpu_trial
         {
             (
                 Vec::new(),
@@ -3087,6 +3089,17 @@ fn start_devices(
                     crate::status::warn(&stela_boot_core::work_status::gpu_without_work(reason));
                 }
             });
+            // AMD fork (J6): a GPU trial starts the GPU's driver without
+            // macOS, and reports how far it got.
+            let (work, gpus) = match work {
+                Ok(work) if options.gpu_trial && !options.boots_macos() => {
+                    let started = open_gpus(work, mmio, remappers, handoff, host_firmware, gpus);
+                    output::arguments(format_args!("GPU TRIAL started={started}\n"));
+                    output::flush_log();
+                    (Ok(work), Vec::new())
+                }
+                work => (work, gpus),
+            };
             if options.boots_macos()
                 && let Ok(work) = work
                 && open_gpus(work, mmio, remappers, handoff, host_firmware, gpus)

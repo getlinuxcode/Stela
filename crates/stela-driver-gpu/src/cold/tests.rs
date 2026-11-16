@@ -187,9 +187,13 @@ unsafe impl Timer for PhysicalTimer {
     }
 }
 fn inputs() -> (Inputs<Peer, OldViews>, Rc<RefCell<State>>) {
+    inputs_for(0x1234_10de)
+}
+/// A display function with this identity word (device, vendor).
+fn inputs_for(identity: u32) -> (Inputs<Peer, OldViews>, Rc<RefCell<State>>) {
     let state = Rc::new(RefCell::new(State::default()));
     let mut words = [0; 128];
-    words[0] = 0x1234_10de;
+    words[0] = identity;
     words[1] = 0x0010_0402;
     words[2] = 0x0300_0001;
     words[4] = 0xfe00_0000;
@@ -249,6 +253,24 @@ fn timed_flr_precedes_original_drain_and_unique_bind() {
         assert!(state.borrow().minimum_waited_us >= 100_000);
     }
     kept(&state.borrow());
+}
+/// AMD fork (J6): an RDNA 4 Radeon (Navi 48) takes the same cold handoff.
+#[test]
+fn a_radeon_takes_the_same_cold_handoff() {
+    let (inputs, state) = inputs_for(0x7550_1002);
+    {
+        let _ready = Cold::new(inputs)
+            .quiesce_and_bind()
+            .unwrap_or_else(|error| panic!("{:?}", error.error));
+        assert_eq!(
+            state.borrow().events,
+            ["views-seal", "flr", "root-drain", "bind"]
+        );
+    }
+    kept(&state.borrow());
+    let (inputs, state) = inputs_for(0x7550_8086);
+    drop(failure(Cold::new(inputs).quiesce_and_bind()));
+    assert!(state.borrow().events.is_empty());
 }
 #[test]
 fn preflight_never_seals_or_resets_an_unsupported_or_foreign_source() {

@@ -131,3 +131,130 @@ void irq_set_chip_and_handler_name(unsigned int irq, const struct irq_chip *chip
 	(void)name;
 	WARN_ONCE(1, "amdgpu: no interrupt domain under Stela\n");
 }
+
+/*
+ * A bus amdgpu adds (a connector's DDC, the SMU's EEPROM bus) is deleted
+ * with the device's other managed actions, as devres.c's devm_ variant.
+ */
+#include <linux/i2c.h>
+
+static void delete_adapter(void *adapter)
+{
+	i2c_del_adapter(adapter);
+}
+
+int devm_i2c_add_adapter(struct device *dev, struct i2c_adapter *adapter)
+{
+	int error = i2c_add_adapter(adapter);
+
+	if (error)
+		return error;
+	return devm_add_action_or_reset(dev, delete_adapter, adapter);
+}
+
+/*
+ * Masking a requested line, nested as Linux's depth counts: amdgpu stops
+ * its fence interrupt around a GPU reset (amdgpu_fence_driver_isr_toggle).
+ * The owner masks the source (irq_disable); an owner runs its handlers on
+ * its one service CPU, in atomic scopes this caller cannot be inside, so
+ * none is running when the mask returns, which is what disable_irq waits
+ * for. amdgpu's handler is a primary one, without a thread to wait for.
+ */
+#include <linux/interrupt.h>
+#include <linux/mutex.h>
+#include <linux/slab.h>
+#include <stela/linux.h>
+
+struct masked_line {
+	struct list_head node;
+	unsigned int irq;
+	unsigned int depth;
+};
+
+static LIST_HEAD(masked_lines);
+static DEFINE_MUTEX(masked_mutex);
+
+static struct masked_line *masked_line(unsigned int irq)
+{
+	struct masked_line *line;
+
+	list_for_each_entry(line, &masked_lines, node)
+		if (line->irq == irq)
+			return line;
+	return NULL;
+}
+
+void disable_irq(unsigned int irq)
+{
+	const struct stela_linux_owner *owner = stela_linux_owner();
+	struct masked_line *line;
+
+	mutex_lock(&masked_mutex);
+	line = masked_line(irq);
+	if (!line) {
+		line = kzalloc_obj(*line);
+		if (!line)
+			stela_linux_fatal("amdgpu: no memory to mask an interrupt line");
+		line->irq = irq;
+		list_add(&line->node, &masked_lines);
+	}
+	if (line->depth++ == 0 &&
+	    (!owner->services->irq_disable || owner->services->irq_disable(owner->context, irq)))
+		stela_linux_fatal("amdgpu: interrupt mask unavailable");
+	mutex_unlock(&masked_mutex);
+}
+
+void enable_irq(unsigned int irq)
+{
+	const struct stela_linux_owner *owner = stela_linux_owner();
+	struct masked_line *line;
+	bool unexposed = false;
+
+	mutex_lock(&masked_mutex);
+	line = masked_line(irq);
+	if (WARN(!line || !line->depth, "Unbalanced enable for IRQ %u\n", irq)) {
+		mutex_unlock(&masked_mutex);
+		return;
+	}
+	if (--line->depth == 0) {
+		list_del(&line->node);
+		kfree(line);
+		if (!owner->services->irq_enable ||
+		    owner->services->irq_enable(owner->context, irq, &unexposed))
+			stela_linux_fatal("amdgpu: interrupt unmask unavailable");
+	}
+	mutex_unlock(&masked_mutex);
+}
+
+/*
+ * A fatal uncorrectable hardware error (RAS) with amdgpu's emergency
+ * restart policy set: Stela stops at the owner's terminal boundary, which
+ * logs it, rather than resetting the machine under its other services.
+ */
+#include <linux/reboot.h>
+
+void emergency_restart(void)
+{
+	stela_linux_fatal("amdgpu: emergency restart after a fatal hardware error");
+}
+
+/*
+ * The compute partition devices amdxcp makes, which only partitioned
+ * Instinct GPUs (GFX 9.4.3 and later) ask for: none on a desktop card.
+ */
+#include <linux/platform_device.h>
+
+struct platform_device *platform_device_register_full(const struct platform_device_info *info)
+{
+	(void)info;
+	return ERR_PTR(-ENODEV);
+}
+
+/*
+ * The environment never makes a device link (device_link_add is
+ * unsupported); only an APU's USB power dependency would hold one.
+ */
+void device_link_del(struct device_link *link)
+{
+	WARN_ON(link);
+}

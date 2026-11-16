@@ -33,6 +33,8 @@ diagnostics = ["stela-drivers/irq-diagnostics"]
 native-profile = ["stela-soc/native-profile", "stela-engine/native-profile"]
 # NVK, NIR and NAK in the image, from `cargo xtask gpu nvk`.
 nvk = ["dep:stela-mesa", "stela-drivers/metal-linked"]
+# AMD fork (J6): amdgpu in the image; a Radeon RDNA 4 is claimed for it.
+amdgpu = ["stela-drivers/amdgpu-port"]
 
 [dependencies]
 stela-linux = { path = "../stela-linux", features = ["kernel"] }

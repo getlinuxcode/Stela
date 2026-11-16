@@ -163,6 +163,106 @@ void stela_linux_devres_release(struct device *dev)
 	}
 }
 
+/* Groups of managed actions, following devres.c: a group opens with a
+ * marker and, once closed, ends with another; releasing it undoes the
+ * actions between them, last first, and leaves the rest. A device detaching
+ * with a group still on it frees the group with the opening marker. */
+struct managed_group {
+	void *id;
+	bool closed;
+};
+
+static void group_opened(void *data)
+{
+	kfree(data);
+}
+
+static void group_closed(void *data)
+{
+	(void)data;
+}
+
+static bool group_marker(const struct managed_action *managed)
+{
+	return managed->action == group_opened || managed->action == group_closed;
+}
+
+/* The group named id, or the latest still open when id is NULL. */
+static struct managed_group *find_group(struct device *dev, void *id)
+{
+	struct managed_action *managed;
+
+	list_for_each_entry(managed, &dev->devres_head, node) {
+		struct managed_group *group = managed->data;
+
+		if (managed->action != group_opened)
+			continue;
+		if (id ? group->id == id : !group->closed)
+			return group;
+	}
+	return NULL;
+}
+
+void *devres_open_group(struct device *dev, void *id, gfp_t gfp)
+{
+	struct managed_group *group = kmalloc(sizeof(*group), gfp);
+
+	if (!group)
+		return NULL;
+	group->id = id ? id : group;
+	group->closed = false;
+	if (__devm_add_action(dev, group_opened, group, "group")) {
+		kfree(group);
+		return NULL;
+	}
+	return group->id;
+}
+
+void devres_close_group(struct device *dev, void *id)
+{
+	struct managed_group *group = find_group(dev, id);
+
+	if (WARN_ON(!group) || group->closed)
+		return;
+	if (!__devm_add_action(dev, group_closed, group, "group"))
+		group->closed = true;
+}
+
+int devres_release_group(struct device *dev, void *id)
+{
+	struct managed_group *group = find_group(dev, id);
+	struct managed_action *managed, *next;
+	LIST_HEAD(members);
+	bool inside;
+	int count = 0;
+
+	if (WARN_ON(!group))
+		return 0;
+	/* Newest first: what follows the closing marker stays, and the
+	 * opening marker ends the group. */
+	inside = !group->closed;
+	list_for_each_entry_safe(managed, next, &dev->devres_head, node) {
+		bool own = managed->data == group && group_marker(managed);
+
+		if (own || inside)
+			list_move_tail(&managed->node, &members);
+		if (own && managed->action == group_opened)
+			break;
+		if (own)
+			inside = true;
+		else if (inside)
+			count += !group_marker(managed);
+	}
+	/* Unlinked, the actions run last first; the opening marker comes
+	 * last and frees the group. */
+	list_for_each_entry_safe(managed, next, &members, node) {
+		list_del(&managed->node);
+		managed->action(managed->data);
+		kfree(managed);
+	}
+	return count;
+}
+
 int dev_err_probe(const struct device *dev, int err, const char *fmt, ...)
 {
 	va_list arguments;
@@ -320,6 +420,18 @@ int main(void)
 	assert(!__devm_add_action(&child, undo, (void *)&c, "c"));
 	devm_release_action(&child, undo, (void *)&b);
 	assert(undone_count == 1 && undone[0] == 'b');
+	/* A closed group undoes what it holds, not what came after it. */
+	static const char d = 'd', e = 'e';
+	void *group = devres_open_group(&child, NULL, GFP_KERNEL);
+	assert(group);
+	assert(!__devm_add_action(&child, undo, (void *)&d, "d"));
+	devres_close_group(&child, group);
+	assert(!__devm_add_action(&child, undo, (void *)&e, "e"));
+	assert(devres_release_group(&child, group) == 1);
+	assert(undone_count == 2 && undone[1] == 'd');
+	devm_release_action(&child, undo, (void *)&e);
+	assert(undone_count == 3 && undone[2] == 'e');
+	undone_count = 1;
 	device_unregister(&child);
 	assert(!memcmp(undone, "bca", 3));
 	put_device(&child);

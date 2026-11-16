@@ -71,27 +71,39 @@ impl Runner<'_> {
                     let bytes = buffer.bytes(length).to_vec();
                     let mut resolver = self.device.resolver();
                     match (stage, stride) {
-                        (Stage::Kernel, Some(stride)) => commands
-                            .set_compute_bytes_with_stride(&mut resolver, &bytes, stride, index)?,
+                        (Stage::Kernel, Some(stride)) => commands.set_compute_bytes_with_stride(
+                            &mut resolver,
+                            &bytes,
+                            stride,
+                            index,
+                        )?,
                         (Stage::Kernel, None) => {
                             commands.set_compute_bytes(&mut resolver, &bytes, index)?
                         }
-                        (_, None) => commands.set_render_bytes(&mut resolver, stage, &bytes, index)?,
+                        (_, None) => {
+                            commands.set_render_bytes(&mut resolver, stage, &bytes, index)?
+                        }
                         _ => return Err(Error::Unsupported("an inline buffer with a stride")),
                     }
                     continue;
                 }
                 let reference = self.device.buffer(buffer.id)?;
                 match (stage, stride) {
-                    (Stage::Kernel, Some(stride)) => commands
-                        .set_compute_buffer_with_stride(Some(reference), offset, stride, index)?,
+                    (Stage::Kernel, Some(stride)) => commands.set_compute_buffer_with_stride(
+                        Some(reference),
+                        offset,
+                        stride,
+                        index,
+                    )?,
                     (Stage::Kernel, None) => {
                         commands.set_compute_buffer(Some(reference), offset, index)?
                     }
                     (Stage::Vertex, Some(stride)) => {
                         commands.set_vertex_buffer_with_stride(reference, offset, stride, index)?
                     }
-                    (_, None) => commands.set_render_buffer(stage, Some(reference), offset, index)?,
+                    (_, None) => {
+                        commands.set_render_buffer(stage, Some(reference), offset, index)?
+                    }
                     _ => return Err(Error::Unsupported("a fragment buffer with a stride")),
                 }
             }

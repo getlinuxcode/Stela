@@ -35,11 +35,11 @@ mod device;
 #[cfg(feature = "radv-host")]
 mod suite;
 #[cfg(feature = "radv-host")]
-mod suite_blit;
+mod suite_arguments;
 #[cfg(feature = "radv-host")]
 mod suite_bind;
 #[cfg(feature = "radv-host")]
-mod suite_arguments;
+mod suite_blit;
 #[cfg(feature = "radv-host")]
 mod suite_constants;
 #[cfg(feature = "radv-host")]

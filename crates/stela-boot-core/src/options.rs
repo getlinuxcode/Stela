@@ -264,6 +264,9 @@ pub struct System {
     /// Answer device accesses no model implements and list them
     /// (`--survey`): research runs only.
     pub survey: bool,
+    /// AMD fork (J6): start the GPU even when the boot runs no macOS
+    /// (`--gpu-trial`), to see its driver start in a VM: research runs only.
+    pub gpu_trial: bool,
     /// Leap the counter over waits of every PE (`--idle-skip`): boot and
     /// install runs, not interactive use.
     pub idle_skip: bool,
@@ -386,6 +389,7 @@ impl Default for System {
             development_restore: false,
             development_board: false,
             survey: false,
+            gpu_trial: false,
             idle_skip: false,
             input: false,
             native_cores: None,
@@ -836,6 +840,7 @@ impl fmt::Display for System {
         line.flag("--input", self.input)?;
         line.flag("--idle-skip", self.idle_skip)?;
         line.flag("--survey", self.survey)?;
+        line.flag("--gpu-trial", self.gpu_trial)?;
         line.flag("--sep-observe", self.sep_observe)?;
         line.value(NATIVE_CORES, self.native_cores)?;
         line.value(GUEST_PES, self.guest_pes)?;

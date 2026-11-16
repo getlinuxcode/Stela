@@ -1,14 +1,4 @@
-amdgpu census: 909 of 909 sources compile; 0 stop on these causes
+amdgpu census: 910 of 910 sources compile; 0 stop on these causes
 
 
-10 kernel services amdgpu imports that the environment does not define:
-  device_link_del
-  devm_i2c_add_adapter
-  devres_close_group
-  devres_open_group
-  devres_release_group
-  disable_irq
-  emergency_restart
-  enable_irq
-  platform_device_register_full
-  sscanf
+0 kernel services amdgpu imports that the environment does not define:

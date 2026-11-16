@@ -7,7 +7,9 @@ use super::suite::{Held, Runner, Shared};
 use core::ptr::NonNull;
 use serde_json::Value;
 use stela_driver_gpu::metal::{
-    abi::{CpuCacheMode, HazardTrackingMode, HeapType, ResourceOptions, SparsePageSize, StorageMode},
+    abi::{
+        CpuCacheMode, HazardTrackingMode, HeapType, ResourceOptions, SparsePageSize, StorageMode,
+    },
     device::HeapId,
     error::{Error, Result},
     heap::{HeapDescriptor, PAGE},
@@ -62,7 +64,10 @@ impl Runner<'_> {
                 self.next_import += 1;
                 let (memory, pointer) =
                     super::device::shared_memory(self.device, self.exporter, index, bytes)?;
-                (self.device.new_imported_heap(memory, &descriptor)?, Some(pointer))
+                (
+                    self.device.new_imported_heap(memory, &descriptor)?,
+                    Some(pointer),
+                )
             } else {
                 (self.device.new_heap(&descriptor)?, None)
             };

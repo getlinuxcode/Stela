@@ -291,7 +291,12 @@ impl CommandBuffer {
                         vertex_buffers: Vec::new(),
                     },
                 };
-                let (layout, preprocess) = resolver.generated_layout(&key, class.set, class.set.is_none().then_some(class.pipeline), 1)?;
+                let (layout, preprocess) = resolver.generated_layout(
+                    &key,
+                    class.set,
+                    class.set.is_none().then_some(class.pipeline),
+                    1,
+                )?;
                 executions.push((
                     ResolveSlot {
                         class: class.index,
@@ -323,7 +328,12 @@ impl CommandBuffer {
                             .collect(),
                     },
                 };
-                let (layout, preprocess) = resolver.generated_layout(&key, class.set, class.set.is_none().then_some(class.pipeline), 1)?;
+                let (layout, preprocess) = resolver.generated_layout(
+                    &key,
+                    class.set,
+                    class.set.is_none().then_some(class.pipeline),
+                    1,
+                )?;
                 for &primitive in primitives(class.topology) {
                     executions.push((
                         ResolveSlot {
@@ -457,7 +467,8 @@ impl CommandBuffer {
             execution_set: set.is_some(),
             work: GeneratedWork::Dispatch,
         };
-        let (layout, preprocess) = resolver.generated_layout(&key, set, set.is_none().then_some(pipeline), sequences)?;
+        let (layout, preprocess) =
+            resolver.generated_layout(&key, set, set.is_none().then_some(pipeline), sequences)?;
         let resolved = self.resolve_dispatches(resolver, arguments)?;
         let regions = self.preprocess(resolver, &[preprocess], executions)?;
         self.recorder.push(Command::BindPipeline {

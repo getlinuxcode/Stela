@@ -30,7 +30,9 @@ use stela_driver_gpu::metal::{
         pipelines::{ComputePipelineRequest, PipelineArchives},
     },
     error::{Error, Result},
-    vertex::{Attribute, STRIDE_DYNAMIC, StageInLayout, StageInStep, StageInputDescriptor, VertexFormat},
+    vertex::{
+        Attribute, STRIDE_DYNAMIC, StageInLayout, StageInStep, StageInputDescriptor, VertexFormat,
+    },
     vulkan::object::Semaphore,
 };
 
@@ -156,7 +158,17 @@ fn basic(case: &Value) -> bool {
 /// of its kind it reproduces, over the case's resources.
 fn sequence(case: &Value) -> bool {
     const CASE: [&str; 12] = [
-        "arguments", "buffers", "heaps", "icbs", "kind", "library", "name", "outputs", "requires", "samplers", "steps",
+        "arguments",
+        "buffers",
+        "heaps",
+        "icbs",
+        "kind",
+        "library",
+        "name",
+        "outputs",
+        "requires",
+        "samplers",
+        "steps",
         "textures",
     ];
     /// What steps add to a case of their kind: sequencing, and fences and
@@ -363,7 +375,10 @@ pub(crate) struct Held {
     /// The sequence's events, by name.
     pub(crate) events: BTreeMap<String, Semaphore>,
     pub(crate) heaps: Vec<super::suite_heaps::Heap>,
-    pub(crate) icbs: Vec<(String, stela_driver_gpu::metal::indirect::IndirectCommandBufferId)>,
+    pub(crate) icbs: Vec<(
+        String,
+        stela_driver_gpu::metal::indirect::IndirectCommandBufferId,
+    )>,
 }
 
 impl Held {
@@ -650,8 +665,12 @@ impl Runner<'_> {
         let mut commands = self.device.new_command_buffer();
         self.make_heaps(&case["heaps"], held)?;
         self.make_buffers(&case["buffers"], held)?;
-        held.textures =
-            self.make_textures(&case["textures"], &mut commands, &mut held.buffers, &held.named)?;
+        held.textures = self.make_textures(
+            &case["textures"],
+            &mut commands,
+            &mut held.buffers,
+            &held.named,
+        )?;
         for spec in case["samplers"].as_array().into_iter().flatten() {
             let (id, resource) = self.make_sampler(spec)?;
             held.samplers.push((

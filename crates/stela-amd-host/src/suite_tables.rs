@@ -6,8 +6,8 @@ use super::suite::Runner;
 use serde_json::Value;
 use stela_driver_gpu::metal::{
     command_buffer::CommandBuffer,
-    device::{ComputePipelineId, FunctionId, LibraryId, RenderPipelineId},
     device::pipelines::LinkedFunctions,
+    device::{ComputePipelineId, FunctionId, LibraryId, RenderPipelineId},
     error::{Error, Result},
     shader::Stage,
 };
@@ -26,20 +26,27 @@ pub fn supported(spec: &Value, prefix: &str) -> bool {
             .all(|entry| {
                 // A function by name, or from another library.
                 entry.is_string()
-                    || entry.as_object().is_some_and(|e| {
-                        e.keys().all(|k| k == "library" || k == "name")
-                    })
+                    || entry
+                        .as_object()
+                        .is_some_and(|e| e.keys().all(|k| k == "library" || k == "name"))
             })
     };
-    let tables = spec[format!("{prefix}{}", if prefix.is_empty() { "function_tables" } else { "tables" })]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .all(|table| {
-            table
-                .as_object()
-                .is_some_and(|t| t.keys().all(|k| k == "functions" || k == "index"))
-        });
+    let tables = spec[format!(
+        "{prefix}{}",
+        if prefix.is_empty() {
+            "function_tables"
+        } else {
+            "tables"
+        }
+    )]
+    .as_array()
+    .into_iter()
+    .flatten()
+    .all(|table| {
+        table
+            .as_object()
+            .is_some_and(|t| t.keys().all(|k| k == "functions" || k == "index"))
+    });
     names("visible_functions") && names("private_functions") && names("binary_functions") && tables
 }
 
@@ -60,7 +67,11 @@ impl Runner<'_> {
             ("binary_functions", false),
             ("private_functions", true),
         ] {
-            for name in spec[format!("{prefix}{key}")].as_array().into_iter().flatten() {
+            for name in spec[format!("{prefix}{key}")]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
                 let (from, name) = match name.as_str() {
                     Some(name) => (library, name),
                     None => (
@@ -88,7 +99,12 @@ impl Runner<'_> {
         &mut self,
         tables: &Value,
         linked: &Linked,
-        handle: &mut dyn FnMut(&mut Self, FunctionId) -> Result<Option<stela_driver_gpu::metal::device::pipelines::FunctionHandle>>,
+        handle: &mut dyn FnMut(
+            &mut Self,
+            FunctionId,
+        ) -> Result<
+            Option<stela_driver_gpu::metal::device::pipelines::FunctionHandle>,
+        >,
         commands: &mut CommandBuffer,
         stage: Stage,
     ) -> Result<()> {
@@ -103,7 +119,9 @@ impl Runner<'_> {
                     .iter()
                     .find(|(n, _)| n == name)
                     .map(|(_, id)| *id)
-                    .ok_or(Error::Invalid("a table names a function the stage does not link"))?;
+                    .ok_or(Error::Invalid(
+                        "a table names a function the stage does not link",
+                    ))?;
                 handles.push(Some(
                     handle(self, function)?.ok_or(Error::Invalid("no function handle"))?,
                 ));
@@ -152,7 +170,11 @@ impl Runner<'_> {
             self.bind_tables(
                 &render[key],
                 linked,
-                &mut |runner, function| runner.device.render_function_handle(pipeline, stage, function),
+                &mut |runner, function| {
+                    runner
+                        .device
+                        .render_function_handle(pipeline, stage, function)
+                },
                 commands,
                 stage,
             )?;

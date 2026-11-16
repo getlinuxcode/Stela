@@ -47,7 +47,7 @@ sudo xtask/scripts/vfio-gpu.sh run --stop-desktop --seconds 1800 -- \
 - **Le bug de réinitialisation des Radeon** : la Navi 48 se réinitialise mal en VFIO. Le script laisse amdgpu prendre la carte au démarrage et ne la détache qu'au moment de l'essai, comme le recommandent les retours d'expérience. Il ne la réserve jamais à vfio-pci dès le démarrage. Le script désactive aussi la réinitialisation FLR (`reset_method` vide), et QEMU réinitialise alors le slot. Ce choix est à valider sur la Navi 48 : certains utilisateurs ont dû interdire aussi la réinitialisation du bus. Un pilote amdgpu en cours de mise au point laissera parfois la carte dans un état que seul un redémarrage de l'hôte répare.
 - Activer l'IOMMU (`amd_iommu=on`, souvent actif par défaut) et la Resizable BAR dans le firmware de la carte mère.
 
-## Où on en est (16 novembre 2026)
+## Où on en est (17 novembre 2026)
 
 Fait depuis Windows, sans la carte :
 
@@ -66,10 +66,13 @@ Fait sous Linux (Ubuntu 24.04, noyau 6.14, Mesa 25.2.8) :
 
 - J4 : le vrai périphérique Metal de Stela tourne sur la 9070 XT, sous Linux, sur un RADV construit à partir du Mesa de Stela avec le compilateur Metal (`libstela_radv.so`). Le premier calcul et le premier rendu sont vérifiés, et 13 891 cas de la suite Metal (98,1 %) passent à l'identique du Mac : calculs, rendus, blits, séquences, bibliothèques compilées à l'exécution, tessellation, mesh, heaps, argument buffers, indirect command buffers, vues de textures, tables de fonctions et tuiles (`docs/amd/device.md`). En route, trois patchs RADV (`9001` à `9003`) et deux corrections de Stela : un scissor par viewport, et le pipeline transmis aux commandes générées par le GPU.
 
+- J6 (17 novembre 2026) : amdgpu est lié dans l'image de Stela (`--features amdgpu`), avec tous ses services noyau. Le démarrage prend une Radeon RDNA 4 et lance l'image d'amdgpu. Le mode `--gpu-trial` est vérifié en VM sans carte (`GPU TRIAL started=false`).
+
 À faire ensuite, dans cet ordre :
 
-1. J6 : fournir à amdgpu ses 10 derniers services noyau, en faire un vrai port lié (sur le modèle de `build/nouveau.rs`), puis l'enregistrer au démarrage et l'essayer en VM avec la carte prêtée. Pendant les essais, l'agent travaille dans `tmux` (`xtask/scripts/amd-agent.sh`) : le bureau s'arrête, la session de travail non.
-2. J1 : voir l'écran de démarrage nommer la carte, au premier essai de J6 en VM.
+1. J6 : premier essai en VM avec la carte prêtée. L'image se construit avec `xtask/scripts/amd-gpu-trial.sh build`, et l'essai se lance par `sudo systemd-run --unit=stela-amd-gpu --collect --setenv=STELA_VFIO_USER=$USER "$PWD/xtask/scripts/amd-gpu-trial.sh" run`. Le compte rendu est dans `.stela/vm/gpu-trial/report.txt`. Il faut le mot de passe `sudo`, donc c'est l'utilisateur qui le lance. Attendu : amdgpu sonde la carte, puis échoue au premier firmware, puisque son catalogue est encore vide.
+2. J6 : épingler les firmwares de la Navi 48 et les fournir à amdgpu, puis avancer étape par étape (PSP, SMU, MES, SDMA).
+3. J1 : voir l'écran de démarrage nommer la carte.
 
 ## Jalons
 
@@ -148,10 +151,10 @@ Détails et commandes dans `docs/amd/device.md`.
 Le plus gros chantier. Mise au point dans la VM avec la carte prêtée (voir « Développement en VM »), puis vérification sur la machine réelle avec le journal de démarrage sur la clé USB.
 
 - [x] Ajouter `drivers/gpu/drm/amd/` (amdgpu, display/DC, pm/swsmu, include) à `third_party/linux.sparse`, sans amdkfd (seulement ses en-têtes).
-- [ ] Compiler amdgpu sur `stela-linux` et écrire les patches de compatibilité nécessaires (`third_party/patches/amdgpu/`). Fait : Kbuild lu par GNU Make (`xtask/scripts/amd-kbuild.py`, 892 objets) et recensement (`amdgpu-census`) : les 909 sources (amdgpu, amdxcp, assistants DRM, bibliothèque) compilent dans l'environnement, et 10 services noyau restent à fournir sur 105 (`docs/amd/amdgpu.md`, services du fork dans `src/amd/linux/`).
-- [ ] Créer `amdgpu.rs` (enregistrement du pilote au démarrage) et `amd.rs` (PCI, MMIO, DMA, pages), sur le modèle de `nouveau.rs` et `nvidia.rs`.
+- [x] Compiler amdgpu sur `stela-linux` sans patch de ses sources : Kbuild lu par GNU Make (`xtask/scripts/amd-kbuild.py`, 892 objets), les 910 sources (amdgpu, amdxcp, assistants DRM, bibliothèque, services du fork) compilent, tous les services noyau sont fournis (services du fork dans `src/amd/linux/`, groupes `devres` dans l'environnement), et le port est lié (`amdgpu-port` : archive `stela-amdgpu`, image `stela_linux_amdgpu_image`, liste `OPEN` vérifiée à chaque build).
+- [x] Créer `amdgpu.rs` (démarrage de l'image d'amdgpu, `amdgpu.runpm=0`). PCI, MMIO, DMA et pages passent par l'hôte commun de `engine/gpu.rs`, sans fichier `amd.rs`.
 - [ ] Firmwares : ajouter au provisionnement de `stela-cli` les fichiers `amdgpu/` de linux-firmware pour la Navi 48 (gc_12_0_1, psp_14_0_3, smu_14_0_3, sdma_7_0_1, dcn_4_0_1, noms à confirmer).
-- [ ] Démarrage côté Stela : réclamer les cartes AMD dans `engine/gpu.rs` et `engine/start.rs`, et donner les messages d'état AMD dans `gpu_status.rs`.
+- [ ] Démarrage côté Stela : réclamer les cartes AMD dans `engine/gpu.rs` et `engine/start.rs`, et donner les messages d'état AMD dans `gpu_status.rs`. Fait : `engine/gpu_amd.rs` prend la Radeon (BAR 5, passage à froid commun) et démarre l'image d'amdgpu (fonctionnalité `amdgpu`). L'option `--gpu-trial` démarre le GPU sans macOS, et `xtask/scripts/amd-gpu-trial.sh` fait l'essai en VM. Restent les messages d'état et le premier essai avec la carte.
 - [ ] Étapes d'initialisation à valider dans le journal : IP discovery, PSP, SMU, file graphique MES, SDMA, puis le premier paquet de commandes exécuté.
 - [ ] Affichage par DC/DCN via DRM, que `metal/kms.rs` utilise sans modification.
 

@@ -17,6 +17,8 @@ use stela_driver_base::{
 };
 
 const NVIDIA: u16 = 0x10de;
+/// AMD fork (J6): an RDNA 4 Radeon goes through the same cold handoff.
+const AMD: u16 = 0x1002;
 const DISPLAY: u8 = 3;
 const EXPRESS: u8 = 0x10;
 
@@ -187,7 +189,7 @@ fn preflight<C: ConfigSpace>(
     bus_reset: bool,
 ) -> Result<Option<Reset>, Error> {
     timer.check().map_err(Error::Clock)?;
-    if function.vendor != NVIDIA || function.class[0] != DISPLAY {
+    if !matches!(function.vendor, NVIDIA | AMD) || function.class[0] != DISPLAY {
         return Err(Error::Identity);
     }
     requester::validate_stopped(function).map_err(Error::Claim)?;

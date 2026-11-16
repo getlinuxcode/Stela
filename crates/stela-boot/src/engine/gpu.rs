@@ -84,6 +84,11 @@ use stela_linux::{
     threads::{KernelThreadPlatform, TaskDataBacking},
 };
 
+// AMD fork (J6): claiming a Radeon for amdgpu.
+#[cfg(feature = "amdgpu")]
+#[path = "gpu_amd.rs"]
+mod amd;
+
 type Environment = LinuxEnvironment<SLOTS>;
 type LinuxKernel = KernelOwner<Host, SLOTS>;
 type LinuxThreads = TaskRuntime<Host, KernelPages, SLOTS>;
@@ -984,6 +989,9 @@ pub(super) struct Claimed {
     drm: client::DrmDevice,
     #[cfg(feature = "nvk")]
     link: Option<PcieLink>,
+    /// AMD fork: a Radeon, which amdgpu's image drives.
+    #[cfg_attr(not(feature = "amdgpu"), allow(dead_code))]
+    amd: bool,
 }
 
 fn claim(
@@ -1267,6 +1275,7 @@ fn claim(
         drm,
         #[cfg(feature = "nvk")]
         link,
+        amd: false,
     })
 }
 
@@ -1468,6 +1477,45 @@ pub(super) fn claim_all(
     gop: Result<crate::pci_io::ScreenOwner, String>,
     catalog: Option<&Arc<Catalog>>,
 ) -> (Vec<Claimed>, Vec<Refused>) {
+    // AMD fork: each RDNA 4 Radeon after the NVIDIA GPUs, for amdgpu.
+    #[cfg(feature = "amdgpu")]
+    let screen = gop.clone();
+    #[cfg_attr(not(feature = "amdgpu"), allow(unused_mut))]
+    let (mut claimed, mut refused) = claim_nvidia(services, adapters, gop, catalog);
+    #[cfg(feature = "amdgpu")]
+    for adapter in adapters
+        .iter()
+        .filter(|adapter| adapter.vendor == gpu::Vendor::Amd && adapter.amd_chip().is_some())
+    {
+        let result = screen
+            .clone()
+            .map_err(|why| {
+                output::arguments(format_args!("GPU {} refused: {why}\n", adapter.address));
+                ServiceError::Refused("the firmware's screen could not be verified")
+            })
+            .and_then(|gop| amd::claim(services, adapter, claimed.len() as u32, gop));
+        match result {
+            Ok(function) => claimed.push(function),
+            Err(error) => {
+                output::arguments(format_args!("GPU {} refused: {error:?}\n", adapter.address));
+                refused.push(Refused {
+                    address: format!("{}", adapter.address),
+                    device: adapter.device,
+                    reason: stela_boot_core::gpu_status::Reason::Other,
+                    why: format!("{error:?}"),
+                });
+            }
+        }
+    }
+    (claimed, refused)
+}
+
+fn claim_nvidia(
+    services: &dyn NativeServices,
+    adapters: &[gpu::Adapter],
+    gop: Result<crate::pci_io::ScreenOwner, String>,
+    catalog: Option<&Arc<Catalog>>,
+) -> (Vec<Claimed>, Vec<Refused>) {
     use stela_boot_core::gpu_status::Reason;
     let refused_as = |adapter: &gpu::Adapter, reason, why: &dyn core::fmt::Display| Refused {
         address: format!("{}", adapter.address),
@@ -1475,10 +1523,13 @@ pub(super) fn claim_all(
         reason,
         why: format!("{why}"),
     };
-    for adapter in adapters
-        .iter()
-        .filter(|adapter| adapter.vendor != gpu::Vendor::Nvidia)
-    {
+    for adapter in adapters.iter().filter(|adapter| {
+        adapter.vendor != gpu::Vendor::Nvidia
+            // AMD fork: claim_all claims an RDNA 4 Radeon for amdgpu.
+            && !(cfg!(feature = "amdgpu")
+                && adapter.vendor == gpu::Vendor::Amd
+                && adapter.amd_chip().is_some())
+    }) {
         output::arguments(format_args!(
             "GPU {} vendor={:?} device={:04x} unused: {}\n",
             adapter.address,
@@ -1587,7 +1638,12 @@ fn start(kernel: &LinuxKernel, claimed: Vec<Claimed>) -> Started {
         result: Ok(()),
     };
     // SAFETY: entered, on a task.
-    job.result = unsafe { gpu::nouveau::start() };
+    #[cfg(not(feature = "amdgpu"))]
+    let started = unsafe { gpu::nouveau::start() };
+    // SAFETY: as above. AMD fork: amdgpu's image for a Radeon.
+    #[cfg(feature = "amdgpu")]
+    let started = unsafe { amd::start(&claimed) };
+    job.result = started;
     if job.result.is_err() {
         // No source-specific device return was acknowledged.
         core::mem::forget(claimed);

@@ -30,14 +30,17 @@ pub fn supported(case: &Value) -> bool {
         only(a, &ARGUMENTS)
             && a["entries"].as_array().into_iter().flatten().all(|e| {
                 only(e, &ENTRY)
-                    && matches!(e["kind"].as_str(), Some(
+                    && matches!(
+                        e["kind"].as_str(),
+                        Some(
                             "buffer"
                                 | "texture"
                                 | "sampler"
                                 | "icb"
                                 | "compute_pipeline"
                                 | "render_pipeline"
-                        ))
+                        )
+                    )
             })
     })
 }
@@ -69,7 +72,9 @@ impl Runner<'_> {
                             .iter()
                             .find(|(n, _)| n == name)
                             .map(|(_, id)| *id)
-                            .ok_or(Error::Invalid("an argument names no indirect command buffer"))?;
+                            .ok_or(Error::Invalid(
+                                "an argument names no indirect command buffer",
+                            ))?;
                         self.device.indirect_command_buffer_resource_id(id)?
                     }
                     // Pipelines indirect commands set, by their resource IDs.
@@ -153,11 +158,15 @@ impl Runner<'_> {
             Some(&[]),
         )?;
         let mut targets = RenderTargets::default();
-        targets.color_attachments[0].pixel_format = Some(super::suite::named(
-            PixelFormat::ALL,
-            entry["format"].as_str().unwrap_or_default(),
-        )
-        .ok_or(Error::Unsupported("a pixel format this runner does not name"))?);
+        targets.color_attachments[0].pixel_format = Some(
+            super::suite::named(
+                PixelFormat::ALL,
+                entry["format"].as_str().unwrap_or_default(),
+            )
+            .ok_or(Error::Unsupported(
+                "a pixel format this runner does not name",
+            ))?,
+        );
         self.device.new_render_pipeline(&RenderPipelineRequest {
             vertex_function: vertex,
             fragment_function: Some(fragment),

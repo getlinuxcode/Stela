@@ -8,12 +8,12 @@ use super::suite::{BASIC_OUTPUT, Held, Runner, named};
 use serde_json::{Map, Value};
 use stela_driver_gpu::metal::{
     abi::{
-        BlendFactor, BlendOperation, ColorWriteMask, CompareFunction, CullMode, IndexType,
-        LoadAction, MultisampleDepthResolveFilter, MultisampleStencilResolveFilter,
+        BlendFactor, BlendOperation, ColorWriteMask, CompareFunction, CullMode, DepthClipMode,
+        IndexType, LoadAction, MultisampleDepthResolveFilter, MultisampleStencilResolveFilter,
         PrimitiveTopologyClass, PrimitiveType, StencilOperation, StoreAction, StoreActionOptions,
-        DepthClipMode, TessellationControlPointIndexType, TessellationFactorFormat,
-        TessellationFactorStepFunction, TessellationPartitionMode, TextureType, TriangleFillMode, VisibilityResultMode, VisibilityResultType,
-        Winding,
+        TessellationControlPointIndexType, TessellationFactorFormat,
+        TessellationFactorStepFunction, TessellationPartitionMode, TextureType, TriangleFillMode,
+        VisibilityResultMode, VisibilityResultType, Winding,
     },
     command_buffer::{
         CommandBuffer,
@@ -21,7 +21,9 @@ use stela_driver_gpu::metal::{
     },
     device::{
         TextureId,
-        pipelines::{LinkedFunctions, MeshPipelineRequest, PipelineArchives, RenderPipelineRequest},
+        pipelines::{
+            LinkedFunctions, MeshPipelineRequest, PipelineArchives, RenderPipelineRequest,
+        },
         queue::{AttachmentRequest, RenderPassRequest},
     },
     error::{Error, Result},
@@ -271,11 +273,13 @@ const MESH: [&str; 11] = [
 /// The pipeline's tessellation, as the runner's: half factors, integer
 /// partitions unless named, per-instance factors when the draw has a stride.
 fn tessellation(tess: &Value) -> Result<TessellationDescriptor> {
-    let step = tess["factor_step"].as_str().unwrap_or(if tess["instance_stride"].is_null() {
-        "per_patch"
-    } else {
-        "per_patch_and_per_instance"
-    });
+    let step = tess["factor_step"]
+        .as_str()
+        .unwrap_or(if tess["instance_stride"].is_null() {
+            "per_patch"
+        } else {
+            "per_patch_and_per_instance"
+        });
     Ok(TessellationDescriptor {
         partition_mode: named(
             TessellationPartitionMode::ALL,
@@ -581,7 +585,8 @@ impl Runner<'_> {
         let (vertex_links, vertex_linked) = self.linked_functions(library, render, "vertex_")?;
         let (fragment_links, fragment_linked) =
             self.linked_functions(library, render, "fragment_")?;
-        let targets_formats: [Option<stela_driver_gpu::metal::pixel_format::PixelFormat>; MAX_COLOR_ATTACHMENTS] =
+        let targets_formats: [Option<stela_driver_gpu::metal::pixel_format::PixelFormat>;
+            MAX_COLOR_ATTACHMENTS] =
             core::array::from_fn(|at| targets.color_attachments[at].pixel_format);
         let pipeline = match vertex {
             Some(vertex) => self.device.new_render_pipeline(&RenderPipelineRequest {
@@ -706,14 +711,24 @@ impl Runner<'_> {
         // The encoder's state, the bindings, the draws.
         self.device.begin_render(commands, &pass)?;
         commands.set_render_pipeline_state(&state)?;
-        self.bind_render_tables(render, pipeline, [&vertex_linked, &fragment_linked], commands)?;
+        self.bind_render_tables(
+            render,
+            pipeline,
+            [&vertex_linked, &fragment_linked],
+            commands,
+        )?;
         // Each view's offsets into the viewports and target layers.
         if render["amplification"].is_object() {
             let mappings: Vec<(u32, u32)> = render["amplification"]["mappings"]
                 .as_array()
                 .into_iter()
                 .flatten()
-                .map(|m| (m[0].as_u64().unwrap_or(0) as u32, m[1].as_u64().unwrap_or(0) as u32))
+                .map(|m| {
+                    (
+                        m[0].as_u64().unwrap_or(0) as u32,
+                        m[1].as_u64().unwrap_or(0) as u32,
+                    )
+                })
                 .collect();
             commands.set_vertex_amplification(&mappings)?;
         }
@@ -923,7 +938,10 @@ impl Runner<'_> {
                     .unwrap_or("counting");
                 let mode = named(VisibilityResultMode::ALL, mode)
                     .ok_or(Error::Unsupported("a visibility result mode"))?;
-                let offset = draw.get("visibility_offset").and_then(Value::as_u64).unwrap_or(0);
+                let offset = draw
+                    .get("visibility_offset")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
                 commands.set_visibility_result_mode(mode, offset)?;
             }
             let count = |key: &str, default: u64| {

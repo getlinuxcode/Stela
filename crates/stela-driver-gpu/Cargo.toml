@@ -24,6 +24,9 @@ nouveau-port = ["linux-kernel", "stela-c-build/linux-registry"]
 # AMD fork (J6): checks amdgpu's sources against the Linux environment and
 # reports what stops them (`build/amdgpu.rs`); links nothing.
 amdgpu-census = ["nouveau-port", "dep:serde_json"]
+# AMD fork (J6): amdgpu linked as `stela-amdgpu`, with its own Linux image
+# (`stela_linux_amdgpu_image`); the boot starts it for a Radeon.
+amdgpu-port = ["nouveau-port", "dep:serde_json"]
 # Stela's Metal device over the internal Vulkan boundary; no Vulkan driver.
 metal = ["dep:stela-contracts"]
 # The Metal device's native backend over a loaded Vulkan driver (NVK).

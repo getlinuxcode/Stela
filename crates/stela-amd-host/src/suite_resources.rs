@@ -8,8 +8,9 @@ use serde_json::Value;
 use stela_driver_gpu::metal::{
     abi::{
         BlitOption, CompareFunction, CpuCacheMode, HazardTrackingMode, ResourceOptions,
-        SamplerAddressMode, SamplerBorderColor, SamplerMinMagFilter, SamplerMipFilter, SamplerReductionMode, StorageMode,
-        SwizzleChannels, TextureSwizzle, TextureType, TextureUsage,
+        SamplerAddressMode, SamplerBorderColor, SamplerMinMagFilter, SamplerMipFilter,
+        SamplerReductionMode, StorageMode, SwizzleChannels, TextureSwizzle, TextureType,
+        TextureUsage,
     },
     binding::ResourceId,
     command_buffer::{
@@ -443,13 +444,15 @@ impl Runner<'_> {
             };
         }
         let pixel_format = match spec["format"].as_str() {
-            Some(format) => named(PixelFormat::ALL, format)
-                .ok_or(Error::Unsupported("a pixel format this runner does not name"))?,
+            Some(format) => named(PixelFormat::ALL, format).ok_or(Error::Unsupported(
+                "a pixel format this runner does not name",
+            ))?,
             None => p.pixel_format,
         };
         let texture_type = match spec["type"].as_str() {
-            Some(name) => texture_type(name)
-                .ok_or(Error::Unsupported("a texture type this runner does not make"))?,
+            Some(name) => texture_type(name).ok_or(Error::Unsupported(
+                "a texture type this runner does not make",
+            ))?,
             None => p.texture_type,
         };
         let id = self.device.new_texture_view(

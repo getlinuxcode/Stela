@@ -10,7 +10,7 @@ mod nouveau;
 #[path = "build/nouveau_firmware.rs"]
 mod nouveau_firmware;
 // AMD fork: amdgpu against the Linux environment (J6).
-#[cfg(feature = "amdgpu-census")]
+#[cfg(any(feature = "amdgpu-census", feature = "amdgpu-port"))]
 #[path = "build/amdgpu.rs"]
 mod amdgpu;
 
@@ -36,8 +36,13 @@ fn main() {
     linux.tests(&mut tests);
     #[cfg(feature = "nouveau-port")]
     let mut linux = linux;
+    // AMD fork: amdgpu's image starts from the same environment registrations.
+    #[cfg(feature = "amdgpu-port")]
+    let environment = linux.captured.clone();
     #[cfg(feature = "nouveau-port")]
     nouveau::port(&mut linux);
+    #[cfg(feature = "amdgpu-port")]
+    amdgpu::port(&linux, environment);
     #[cfg(feature = "amdgpu-census")]
     amdgpu::census(&linux);
     #[cfg(feature = "linux-kernel")]

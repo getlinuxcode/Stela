@@ -68,7 +68,9 @@ impl Runner<'_> {
                 &ComputePipelineRequest {
                     compute_function: function,
                     threadgroup_size_is_multiple_of_thread_execution_width: false,
-                    max_total_threads_per_threadgroup: spec["max_total_threads"].as_u64().unwrap_or(0),
+                    max_total_threads_per_threadgroup: spec["max_total_threads"]
+                        .as_u64()
+                        .unwrap_or(0),
                     stage_input: None,
                     linked_functions: LinkedFunctions::default(),
                     support_indirect_command_buffers: false,
@@ -94,8 +96,15 @@ impl Runner<'_> {
         commands: &mut CommandBuffer,
     ) -> Result<()> {
         let tile = |item: &&Value| item["stage"] == "tile";
-        for item in case["buffers"].as_array().into_iter().flatten().filter(tile) {
-            let Some(index) = item["index"].as_u64() else { continue };
+        for item in case["buffers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(tile)
+        {
+            let Some(index) = item["index"].as_u64() else {
+                continue;
+            };
             let at = held.named[item["name"].as_str().unwrap_or_default()];
             let reference = self.device.buffer(held.buffers[at].id)?;
             commands.set_tile_buffer(
@@ -104,15 +113,29 @@ impl Runner<'_> {
                 index as u32,
             )?;
         }
-        for item in case["textures"].as_array().into_iter().flatten().filter(tile) {
-            let Some(index) = item["index"].as_u64() else { continue };
+        for item in case["textures"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(tile)
+        {
+            let Some(index) = item["index"].as_u64() else {
+                continue;
+            };
             let texture = held.texture(item["name"].as_str().unwrap_or_default())?;
             self.device.note_texture_binding(commands, texture);
             let resource = self.device.texture_resource_id(texture)?;
             commands.set_tile_texture(resource, index as u32)?;
         }
-        for item in case["samplers"].as_array().into_iter().flatten().filter(tile) {
-            let Some(index) = item["index"].as_u64() else { continue };
+        for item in case["samplers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(tile)
+        {
+            let Some(index) = item["index"].as_u64() else {
+                continue;
+            };
             let resource = held.sampler(item["name"].as_str().unwrap_or_default())?;
             commands.set_tile_sampler(&mut self.device.resolver(), resource, None, index as u32)?;
         }
@@ -126,9 +149,16 @@ impl Runner<'_> {
         before: bool,
         commands: &mut CommandBuffer,
     ) -> Result<()> {
-        for tile in tiles.iter().filter(|t| (t.spec["before"] == true) == before) {
+        for tile in tiles
+            .iter()
+            .filter(|t| (t.spec["before"] == true) == before)
+        {
             commands.set_tile_pipeline_state(&tile.state, tile.target)?;
-            for memory in tile.spec["threadgroup_memory"].as_array().into_iter().flatten() {
+            for memory in tile.spec["threadgroup_memory"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
                 commands.set_tile_threadgroup_memory(
                     memory["length"].as_u64().unwrap_or(16),
                     memory["offset"].as_u64().unwrap_or(0),

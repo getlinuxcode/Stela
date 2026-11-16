@@ -127,6 +127,7 @@ impl ParseState<'_> {
                 options.bundle_directory = Some(String::from(directory));
             }
             "--survey" => options.survey = true,
+            "--gpu-trial" => options.gpu_trial = true,
             VERIFY_ON_READ => options.verify_on_read = true,
             UPDATE_RESTORE => options.update_restore = true,
             "--development-restore" => options.development_restore = true,

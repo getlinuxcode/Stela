@@ -14,6 +14,10 @@ pub mod metal;
 #[cfg(feature = "nouveau-port")]
 pub mod nouveau;
 
+// AMD fork (J6): amdgpu's Linux image.
+#[cfg(feature = "amdgpu-port")]
+pub mod amdgpu;
+
 pub mod amdgpu_chip;
 pub mod cold;
 pub mod gsp_perf;

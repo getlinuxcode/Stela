@@ -546,6 +546,12 @@ fn build_with_diagnostics(release: bool, diagnostics: bool, nvk: bool) -> Result
     if nvk {
         command.args(["--features", "nvk"]);
     }
+    // AMD fork: extra image features, such as `amdgpu` for a Radeon trial.
+    if let Ok(features) = std::env::var("STELA_BOOT_FEATURES")
+        && !features.trim().is_empty()
+    {
+        command.args(["--features", features.trim()]);
+    }
     if release {
         command.arg("--release");
     }

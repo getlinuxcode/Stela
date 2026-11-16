@@ -11,9 +11,7 @@ use stela_driver_gpu::metal::{
     },
     capabilities::Size,
     command_buffer::{
-        CommandBuffer, ComputePipelineState,
-        indirect::ExecutionRange,
-        render::PatchSource,
+        CommandBuffer, ComputePipelineState, indirect::ExecutionRange, render::PatchSource,
     },
     device::pipelines::{ComputePipelineRequest, LinkedFunctions, PipelineArchives},
     error::{Error, Result},
@@ -89,14 +87,18 @@ pub fn supported(case: &Value) -> bool {
                 icb["type"].as_str(),
                 Some("dispatch" | "draw" | "patches" | "mesh")
             )
-            && icb["commands"].as_array().into_iter().flatten().all(|command| {
-                only(command, &COMMAND)
-                    && command["buffers"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .all(|u| only(u, &USE))
-            })
+            && icb["commands"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .all(|command| {
+                    only(command, &COMMAND)
+                        && command["buffers"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .all(|u| only(u, &USE))
+                })
     })
 }
 
@@ -162,7 +164,12 @@ impl Runner<'_> {
             held.icbs
                 .push((spec["name"].as_str().unwrap_or_default().to_owned(), id));
             let library = case["library"].as_str().unwrap_or_default().to_owned();
-            for (index, command) in spec["commands"].as_array().into_iter().flatten().enumerate() {
+            for (index, command) in spec["commands"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
                 if draw {
                     self.encode_draw(id, index, command, held)?;
                 } else {
@@ -179,7 +186,11 @@ impl Runner<'_> {
         Ok(())
     }
 
-    fn buffer_of(&self, held: &Held, name: &str) -> Result<stela_driver_gpu::metal::command_buffer::BufferRef> {
+    fn buffer_of(
+        &self,
+        held: &Held,
+        name: &str,
+    ) -> Result<stela_driver_gpu::metal::command_buffer::BufferRef> {
         let at = *held
             .named
             .get(name)
@@ -211,7 +222,8 @@ impl Runner<'_> {
                 u["index"].as_u64().unwrap_or(0) as u32,
             ));
         }
-        let number = |item: &Value, key: &str, default: u64| item[key].as_u64().unwrap_or(default) as u32;
+        let number =
+            |item: &Value, key: &str, default: u64| item[key].as_u64().unwrap_or(default) as u32;
         let indices = match command["indices"].as_str() {
             Some(name) => Some(self.buffer_of(held, name)?),
             None => None,
@@ -286,7 +298,10 @@ impl Runner<'_> {
             if let Some(length) = mesh["object_threadgroup_memory"].as_u64() {
                 r.set_object_threadgroup_memory_length(length, 0)?;
             }
-            let (object, threads) = (size(&mesh["object_threads"], 1), size(&mesh["mesh_threads"], 1));
+            let (object, threads) = (
+                size(&mesh["object_threads"], 1),
+                size(&mesh["mesh_threads"], 1),
+            );
             if mesh["threads"].is_array() {
                 r.draw_mesh_threads(size(&mesh["threads"], 1), object, threads)?;
             } else {
@@ -346,7 +361,9 @@ impl Runner<'_> {
         held: &Held,
     ) -> Result<()> {
         let pipeline = match command["function"].as_str() {
-            Some(function) => Some(self.icb_pipeline(library, function, &command["stage_input"])?),
+            Some(function) => {
+                Some(self.icb_pipeline(library, function, &command["stage_input"])?)
+            }
             None => None,
         };
         let mut uses = Vec::new();
@@ -369,7 +386,11 @@ impl Runner<'_> {
                 None => k.set_kernel_buffer(buffer, offset, slot)?,
             }
         }
-        for memory in command["threadgroup_memory"].as_array().into_iter().flatten() {
+        for memory in command["threadgroup_memory"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
             k.set_threadgroup_memory_length(
                 memory["length"].as_u64().unwrap_or(16),
                 memory["index"].as_u64().unwrap_or(0) as u32,
@@ -446,7 +467,9 @@ impl Runner<'_> {
             .iter()
             .find(|(n, _)| n == name)
             .map(|(_, id)| *id)
-            .ok_or(Error::Invalid("an execution names no indirect command buffer"))?;
+            .ok_or(Error::Invalid(
+                "an execution names no indirect command buffer",
+            ))?;
         let range = match execute["range_buffer"].as_str() {
             Some(buffer) => ExecutionRange::Indirect {
                 buffer: self.buffer_of(held, buffer)?,
@@ -454,7 +477,9 @@ impl Runner<'_> {
             },
             None => {
                 let start = execute["start"].as_u64().unwrap_or(0) as usize;
-                ExecutionRange::Direct(start..start + execute["count"].as_u64().unwrap_or(1) as usize)
+                ExecutionRange::Direct(
+                    start..start + execute["count"].as_u64().unwrap_or(1) as usize,
+                )
             }
         };
         commands.execute_commands(&mut self.device.resolver(), id, range)
