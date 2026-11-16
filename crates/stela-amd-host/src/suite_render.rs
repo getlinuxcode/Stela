@@ -27,11 +27,11 @@ use stela_driver_gpu::metal::{
         ColorAttachmentDescriptor, DepthStencilDescriptor, MAX_COLOR_ATTACHMENTS, RenderTargets,
         StencilDescriptor, depth_stencil,
     },
-    shader::Stage,
     vertex::{Attribute, Layout, StepFunction, VertexDescriptor, VertexFormat},
 };
 
-const CASE: [&str; 14] = [
+const CASE: [&str; 15] = [
+    "bind",
     "buffers",
     "constants",
     "fragment",
@@ -47,8 +47,9 @@ const CASE: [&str; 14] = [
     "textures",
     "vertex",
 ];
-const RENDER: [&str; 23] = [
+const RENDER: [&str; 24] = [
     "alpha_to_coverage",
+    "base_vertex",
     "samples",
     "base_instance",
     "blend_color",
@@ -72,8 +73,11 @@ const RENDER: [&str; 23] = [
     "viewport",
     "winding",
 ];
-const COLOR: [&str; 9] = [
+const COLOR: [&str; 12] = [
     "blend",
+    "depth_plane",
+    "level",
+    "slice",
     "clear",
     "resolve",
     "resolve_depth_plane",
@@ -107,7 +111,11 @@ const STENCIL: [&str; 14] = [
     "texture",
     "write_mask",
 ];
-const BUFFER: [&str; 7] = [
+const BUFFER: [&str; 11] = [
+    "attribute_stride",
+    "inline",
+    "mutability",
+    "offset",
     "file",
     "index",
     "length",
@@ -138,7 +146,7 @@ pub fn basic(case: &Value) -> bool {
             .as_array()
             .into_iter()
             .flatten()
-            .all(|item| matches!(item["stage"].as_str(), None | Some("vertex" | "fragment")))
+            .all(super::suite_bind::stage_known)
     };
     let mut texture_keys = super::suite_resources::TEXTURE.to_vec();
     texture_keys.push("stage");
@@ -169,13 +177,6 @@ pub fn basic(case: &Value) -> bool {
 /// Whether every output is one this runner writes.
 pub fn all_outputs(outputs: &Value) -> bool {
     all(outputs, &BASIC_OUTPUT)
-}
-
-fn stage(item: &Value) -> Stage {
-    match item["stage"].as_str() {
-        Some("vertex") => Stage::Vertex,
-        _ => Stage::Fragment,
-    }
 }
 
 fn compare(item: &Value, default: &str) -> Result<CompareFunction> {
@@ -353,6 +354,10 @@ impl Runner<'_> {
                 })
             });
             let mut request = attachment(texture, clear, [0.0; 4]);
+            // The level, slice or 3D plane the attachment renders into.
+            request.level = spec["level"].as_u64().unwrap_or(0);
+            request.slice = spec["slice"].as_u64().unwrap_or(0);
+            request.depth_plane = spec["depth_plane"].as_u64().unwrap_or(0);
             if let Some(resolve) = spec["resolve"].as_str() {
                 let number = |key: &str| spec[key].as_u64().unwrap_or(0);
                 request.resolve = Some((
@@ -451,12 +456,14 @@ impl Runner<'_> {
         })?;
         let state = self.device.render_pipeline_state(pipeline)?.clone();
         // An array target renders layered, the vertex function choosing the
-        // slice, as the runner's attachments that name no slice.
+        // slice, unless the attachment names one.
         let mut layers = 0;
         for request in colors
             .iter()
             .flatten()
-            .map(|c| c.texture)
+            .zip(render["colors"].as_array().into_iter().flatten())
+            .filter(|(_, spec)| spec["slice"].is_null())
+            .map(|(c, _)| c.texture)
             .chain(depth_attachment.as_ref().map(|d| d.texture))
         {
             let descriptor = self.device.texture_descriptor(request)?;
@@ -537,39 +544,7 @@ impl Runner<'_> {
                 height: value(3),
             }])?;
         }
-        for spec in case["buffers"].as_array().into_iter().flatten() {
-            let name = spec["name"].as_str().unwrap_or_default();
-            let buffer = &held.buffers[held.named[name]];
-            // A buffer without an index is bound nowhere (an index buffer).
-            let Some(index) = spec["index"].as_u64() else {
-                continue;
-            };
-            let index = index as u32;
-            let reference = self.device.buffer(buffer.id)?;
-            commands.set_render_buffer(stage(spec), Some(reference), 0, index)?;
-        }
-        for spec in case["textures"].as_array().into_iter().flatten() {
-            let Some(index) = spec["index"].as_u64() else {
-                continue;
-            };
-            let texture = Self::texture_named(held, spec["name"].as_str().unwrap_or_default())?;
-            self.device.note_texture_binding(commands, texture);
-            let resource = self.device.texture_resource_id(texture)?;
-            commands.set_render_texture(stage(spec), resource, index as u32)?;
-        }
-        for spec in case["samplers"].as_array().into_iter().flatten() {
-            let Some(index) = spec["index"].as_u64() else {
-                continue;
-            };
-            let resource = held.sampler(spec["name"].as_str().unwrap_or_default())?;
-            commands.set_render_sampler(
-                &mut self.device.resolver(),
-                stage(spec),
-                resource,
-                None,
-                index as u32,
-            )?;
-        }
+        self.bind_resources(case, held, commands, false)?;
         let primitive = named(
             PrimitiveType::ALL,
             render["primitive"].as_str().unwrap_or("triangle"),
@@ -605,7 +580,7 @@ impl Runner<'_> {
                     index_buffer,
                     render["index_offset"].as_u64().unwrap_or(0),
                     count("instance_count", 1),
-                    0,
+                    render["base_vertex"].as_i64().unwrap_or(0) as _,
                     count("base_instance", 0),
                 )?;
             } else {

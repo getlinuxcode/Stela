@@ -30,11 +30,11 @@ use stela_driver_gpu::metal::{
         pipelines::{ComputePipelineRequest, LinkedFunctions, PipelineArchives},
     },
     error::{Error, Result},
-    vertex::{Attribute, StageInLayout, StageInStep, StageInputDescriptor, VertexFormat},
+    vertex::{Attribute, STRIDE_DYNAMIC, StageInLayout, StageInStep, StageInputDescriptor, VertexFormat},
     vulkan::object::Semaphore,
 };
 
-const BASIC_CASE: [&str; 17] = [
+const BASIC_CASE: [&str; 19] = [
     "buffers",
     "constants",
     "stage_input",
@@ -51,11 +51,17 @@ const BASIC_CASE: [&str; 17] = [
     "samplers",
     "textures",
     "threadgroup",
+    "threadgroup_memory",
     "timeout",
+    "bind",
 ];
 /// `storage` and `write_combined` change where the CPU reaches a buffer,
 /// not what it holds.
-const BASIC_BUFFER: [&str; 6] = [
+const BASIC_BUFFER: [&str; 10] = [
+    "attribute_stride",
+    "inline",
+    "mutability",
+    "offset",
     "file",
     "index",
     "length",
@@ -64,7 +70,11 @@ const BASIC_BUFFER: [&str; 6] = [
     "write_combined",
 ];
 /// Besides the bytes, what the check alone reads.
-pub(crate) const BASIC_OUTPUT: [&str; 13] = [
+pub(crate) const BASIC_OUTPUT: [&str; 17] = [
+    "append",
+    "compare",
+    "derive",
+    "judge",
     "as",
     "aspect",
     "dtype",
@@ -352,12 +362,15 @@ fn stage_input(spec: &Value) -> Result<StageInputDescriptor> {
             "constant" => StageInStep::Constant,
             _ => return Err(Error::Unsupported("a stage-in step function")),
         };
-        if item["stride"].is_string() {
-            return Err(Error::Unsupported("a dynamic stage-in stride"));
-        }
+        // A dynamic stride is the buffer binding's attribute stride.
+        let stride = match item["stride"].as_str() {
+            Some("dynamic") => STRIDE_DYNAMIC,
+            Some(_) => return Err(Error::Unsupported("a stage-in stride")),
+            None => number(item, "stride", 16),
+        };
         layouts.push(StageInLayout {
             buffer_index: number(item, "buffer", 0) as u32,
-            stride: number(item, "stride", 16),
+            stride,
             step_function,
             step_rate: if step == "constant" {
                 0
@@ -678,39 +691,7 @@ impl Runner<'_> {
             commands.compute_memory_barrier(BarrierScope::BUFFERS)?;
         }
         commands.set_compute_pipeline_state(&state)?;
-        for spec in step["buffers"].as_array().into_iter().flatten() {
-            let name = spec["name"].as_str().unwrap_or_default();
-            let at = *held
-                .named
-                .get(name)
-                .ok_or(Error::Invalid("a binding names no buffer"))?;
-            let Some(slot) = spec["index"].as_u64() else {
-                continue;
-            };
-            let reference = self.device.buffer(held.buffers[at].id)?;
-            commands.set_compute_buffer(Some(reference), 0, slot as u32)?;
-        }
-        for spec in step["textures"].as_array().into_iter().flatten() {
-            let Some(index) = spec["index"].as_u64() else {
-                continue;
-            };
-            let texture = held.texture(spec["name"].as_str().unwrap_or_default())?;
-            self.device.note_texture_binding(commands, texture);
-            let resource = self.device.texture_resource_id(texture)?;
-            commands.set_compute_texture(resource, index as u32)?;
-        }
-        for spec in step["samplers"].as_array().into_iter().flatten() {
-            let Some(index) = spec["index"].as_u64() else {
-                continue;
-            };
-            let resource = held.sampler(spec["name"].as_str().unwrap_or_default())?;
-            commands.set_compute_sampler(
-                &mut self.device.resolver(),
-                resource,
-                None,
-                index as u32,
-            )?;
-        }
+        self.bind_resources(step, held, commands, true)?;
         let threads = Size {
             width: group[0],
             height: group[1],

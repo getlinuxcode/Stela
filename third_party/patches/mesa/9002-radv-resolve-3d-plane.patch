@@ -1,0 +1,45 @@
+From b8d3cec86bd2c4a9064e1e10bab922b23755b8d6 Mon Sep 17 00:00:00 2001
+From: Stela contributor <contributor@example.invalid>
+Date: Mon, 16 Nov 2026 19:05:54 +0100
+Subject: [PATCH] radv: resolve a rendering's color into the plane of a 3D
+ resolve view
+
+---
+ src/amd/vulkan/meta/radv_meta_resolve.c | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/src/amd/vulkan/meta/radv_meta_resolve.c b/src/amd/vulkan/meta/radv_meta_resolve.c
+index bab4a46..31c525b 100644
+--- a/src/amd/vulkan/meta/radv_meta_resolve.c
++++ b/src/amd/vulkan/meta/radv_meta_resolve.c
+@@ -25,8 +25,11 @@ radv_get_resolve_method(struct radv_image *src_image, struct radv_image *dst_ima
+    /* Default to the fragment resolve path which is optimal for compression. */
+    enum radv_resolve_method resolve_method = RESOLVE_FRAGMENT;
+ 
+-   /* TODO: Add layers support to the fragment resolve path. */
++   /* TODO: Add layers support to the fragment resolve path. It also always writes layer 0: a 3D
++    * destination, whose planes are its depth, resolves through compute.
++    */
+    if (src_image->vk.array_layers > 1 || dst_image->vk.array_layers > 1 ||
++       dst_image->vk.image_type == VK_IMAGE_TYPE_3D ||
+        (dst_image->planes[0].surface.flags & RADEON_SURF_NO_RENDER_TARGET))
+       resolve_method = RESOLVE_COMPUTE;
+ 
+@@ -435,6 +438,14 @@ radv_cmd_buffer_resolve_rendering(struct radv_cmd_buffer *cmd_buffer, const VkRe
+             .dstOffset = {resolve_area.offset.x, resolve_area.offset.y, 0},
+          };
+ 
++         /* A 2D view of a 3D image renders and resolves into the plane its base layer names: a
++          * resolve of a 3D image takes that plane as its z offset.
++          */
++         if (dst_img->vk.image_type == VK_IMAGE_TYPE_3D) {
++            region.dstOffset.z = region.dstSubresource.baseArrayLayer;
++            region.dstSubresource.baseArrayLayer = 0;
++         }
++
+          VkFormat src_format = src_iview->vk.format;
+          VkFormat dst_format = dst_iview->vk.format;
+ 
+-- 
+2.43.0
+
