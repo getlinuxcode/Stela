@@ -80,6 +80,7 @@ Les textures de tous les types que crée la suite (1D, 2D, 3D, cube, tableaux, m
 
 ```sh
 cargo xtask gpu metal-suite mac --host USER@MAC       # plan, bibliothèques et résultats de référence
+python3 -I xtask/scripts/amd-runtime-libraries.py --host USER@MAC   # bibliothèques d'exécution
 sg kvm -c "./target/release/stela-amd-host --suite .stela/metal-suite"
 cargo xtask gpu metal-suite check .stela/metal-suite/results/linux-gfx1201
 ```
@@ -88,10 +89,10 @@ Mesure du 16 novembre 2026 :
 
 | | Cas |
 | --- | --- |
-| Identiques au Mac, dans ses tolérances | 12 848 |
+| Identiques au Mac, dans ses tolérances | 13 582 (95,9 % de la suite) |
 | Écarts | 13, voir plus bas |
-| Non pris en charge | 740 : 737 bibliothèques `*_runtime_*`, que le Mac compile à partir du MSL pendant le cas, et 3 cas qui demandent une capacité que le périphérique n'annonce pas |
-| Pas encore exécutés | 525, dont 125 qui demandent macOS (`host`, `framework`) |
+| Non pris en charge | 6 : 3 bibliothèques d'exécution sans équivalent en ligne de commande (arrondi des conversions, threads requis) et 3 cas qui demandent une capacité que le périphérique n'annonce pas |
+| Pas encore exécutés | 523, dont 125 qui demandent macOS (`host`, `framework`) |
 
 Corrections faites en route, que RADV avec Stela demandait :
 
@@ -107,8 +108,9 @@ Les 13 écarts :
 | PVRTC en stockage partagé | 6 | Le Mac charge et lit ces textures par le CPU. L'exécuteur passe par un blit, faute de mémoire d'invité sous Linux. C'est une limite de l'exécuteur, à revoir avec macOS invité. |
 | Cibles `rgb10a2unorm` et `bgr10a2unorm` | 2 | Une unité de moins sur certains pixels. Pour ces formats, RADV fait sortir la couleur en flottant 16 bits (`ac_choose_spi_color_formats`), ce que son code présente comme requis avec RB+. |
 
+Les bibliothèques `*_runtime_*`, que le Mac compile à partir du MSL pendant le cas, sont compilées à l'avance sur le Mac par `xtask/scripts/amd-runtime-libraries.py`, avec les options de ligne de commande équivalentes (langage, fast math, mode mathématique, macros…), puis chargées depuis `plan/lib-runtime`. Les 7 bibliothèques dont une option n'a pas d'équivalent en ligne de commande restent de côté.
+
 ## Ce qui reste pour J4
 
 - Étendre l'exécuteur aux familles qui restent sous Linux : indirect command buffers (45 cas), tessellation (32), argument buffers (24), tables de fonctions (21), tuiles (19), vues de textures (15), mesh (14), et quelques familles plus petites (164 cas en tout).
-- Compiler sur le Mac les bibliothèques `*_runtime_*`, que le Mac compile à partir du MSL pendant le cas (737 cas).
 - Mesurer les alignements réels (lignes et décalages des surfaces linéaires) sur des images linéaires de RADV, pour remplacer les 256 octets estimés de `metal/amd.rs`.

@@ -733,10 +733,13 @@ impl Runner<'_> {
         if let Some(&id) = self.libraries.get(name) {
             return Ok(id);
         }
-        let path = self.plan_dir.join("lib").join(format!("{name}.metallib"));
         // The suite compiles its *_runtime_* libraries from MSL source as the
-        // case runs, which only a Mac's compiler does.
-        let bytes = fs::read(&path)
+        // case runs, which only a Mac's compiler does: those compiled ahead
+        // of time on one (xtask/scripts/amd-runtime-libraries.py) are in
+        // lib-runtime.
+        let file = format!("{name}.metallib");
+        let bytes = fs::read(self.plan_dir.join("lib").join(&file))
+            .or_else(|_| fs::read(self.plan_dir.join("lib-runtime").join(&file)))
             .map_err(|_| Error::Unsupported("a library compiled from source at run time"))?;
         let id = self.device.new_library(bytes)?;
         self.libraries.insert(name.to_owned(), id);
