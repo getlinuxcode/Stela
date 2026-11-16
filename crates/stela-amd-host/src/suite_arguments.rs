@@ -9,7 +9,9 @@ use stela_driver_gpu::metal::error::{Error, Result};
 /// Whether this runner fills every argument buffer of `case`.
 pub fn supported(case: &Value) -> bool {
     const ARGUMENTS: [&str; 2] = ["buffer", "entries"];
-    const ENTRY: [&str; 8] = [
+    // `residency_set` changes how the Mac makes the resource resident.
+    const ENTRY: [&str; 9] = [
+        "residency_set",
         "format",
         "fragment",
         "function",

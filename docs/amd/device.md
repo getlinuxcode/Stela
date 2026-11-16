@@ -77,7 +77,9 @@ L'exécuteur prépare les ressources d'un cas, puis encode ses étapes. Un cas s
 - les séquences, qui enchaînent ces étapes avec de nouveaux command buffers et des événements ;
 - la tessellation et le mesh (pipelines, tracés directs et indirects) ;
 - les heaps (automatiques ou à placement, partagés ou privés), les argument buffers de Tier 2 (adresses de buffers, identifiants de textures, d'échantillonneurs, d'indirect command buffers et de pipelines) et les indirect command buffers (commandes encodées par le CPU ou par le GPU, copiées, réinitialisées) ;
-- les vues de textures, les liaisons à un décalage, `inline` ou avec des bornes de LOD, plusieurs viewports, les résultats de visibilité et les tracés indirects.
+- les vues de textures, les liaisons à un décalage, `inline` ou avec des bornes de LOD, plusieurs viewports, les résultats de visibilité et les tracés indirects ;
+- les tables de fonctions visibles et les fonctions liées (de la bibliothèque du cas ou d'une autre), en calcul et en rendu ;
+- les tuiles (pipelines de tuile, mémoire de tuile, dispatches avant ou après les tracés), les imageblocks, l'amplification de sommets, les dispatches indirects et les régions d'entrée d'étage lues par le GPU.
 
 Les textures de tous les types que crée la suite (1D, 2D, 3D, cube, tableaux, multi-échantillonnées) sont chargées et relues niveau par niveau, et par aspect pour la profondeur et le stencil (`suite_resources.rs`). Les familles `host` (69 cas) et `framework` (56 cas) testent les API de macOS et les frameworks d'Apple : elles ne peuvent tourner qu'avec un macOS invité, en J7.
 
@@ -92,10 +94,10 @@ Mesure du 16 novembre 2026, sur une exécution complète et neuve de la suite :
 
 | | Cas |
 | --- | --- |
-| Identiques au Mac, dans ses tolérances | 13 829 (97,6 % de la suite) |
+| Identiques au Mac, dans ses tolérances | 13 888 (98,1 % de la suite) |
 | Écarts | 15, voir plus bas |
 | Non pris en charge | 13 : 3 bibliothèques d'exécution sans équivalent en ligne de commande (arrondi des conversions, threads requis) et 10 cas qui demandent une famille (Apple 9, Apple 10) ou une capacité que le périphérique n'annonce pas |
-| Pas encore exécutés | 266, dont 125 qui demandent macOS (`host`, `framework`) |
+| Pas encore exécutés | 207, dont 125 qui demandent macOS (`host`, `framework`) |
 
 Corrections faites en route, que RADV avec Stela demandait :
 
@@ -120,6 +122,6 @@ Les bibliothèques `*_runtime_*`, que le Mac compile à partir du MSL pendant le
 
 ## Ce qui reste pour J4
 
-- Étendre l'exécuteur aux familles qui restent sous Linux (141 cas) : tables de fonctions visibles (29), tuiles et imageblocks (23), réflexion (10), modes de stockage (8), bibliothèques dynamiques (7), fonctions liées (7), argument encoders (8), événements et files (9), compteurs, journal, et quelques cas isolés.
+- Les 82 cas qui ne tournent pas encore sous Linux testent surtout les API de Metal elles-mêmes, que le framework de l'invité porte sous macOS : réflexion et propriétés des pipelines (19), bibliothèques dynamiques, fonctions assemblées et binaires ajoutés (13), argument encoders (11), écouteurs d'événements, gestionnaires et residency sets (10), compteurs et journal (6), tables de fonctions dans des argument buffers ou des tuiles (6), tailles de heaps (5), et une douzaine de cas isolés (texture buffers, biais de LOD, atomiques de textures…). Une partie se reproduirait dans l'exécuteur ; le reste attend macOS invité (J7).
 - Les deux tracés encodés par le GPU qui ne tracent rien.
 - Mesurer les alignements réels (lignes et décalages des surfaces linéaires) sur des images linéaires de RADV, pour remplacer les 256 octets estimés de `metal/amd.rs`.
