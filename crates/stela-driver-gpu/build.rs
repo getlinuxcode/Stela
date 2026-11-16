@@ -9,6 +9,10 @@ mod native;
 mod nouveau;
 #[path = "build/nouveau_firmware.rs"]
 mod nouveau_firmware;
+// AMD fork: amdgpu against the Linux environment (J6).
+#[cfg(feature = "amdgpu-census")]
+#[path = "build/amdgpu.rs"]
+mod amdgpu;
 
 fn main() {
     nouveau_firmware::validate();
@@ -34,6 +38,8 @@ fn main() {
     let mut linux = linux;
     #[cfg(feature = "nouveau-port")]
     nouveau::port(&mut linux);
+    #[cfg(feature = "amdgpu-census")]
+    amdgpu::census(&linux);
     #[cfg(feature = "linux-kernel")]
     tests.write();
 }

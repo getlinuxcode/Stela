@@ -2286,6 +2286,7 @@ dependencies = [
  "ash",
  "cc",
  "object",
+ "serde_json",
  "sha2",
  "stela-c-build",
  "stela-contracts",

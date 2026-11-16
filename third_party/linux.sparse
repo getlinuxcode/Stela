@@ -356,3 +356,9 @@
 /security/Makefile
 /security/commoncap.c
 /security/commoncap_ptrace.c
+# AMD fork (J6): amdgpu, its display (DC), power management and headers.
+# amdkfd serves Linux's compute API, which Stela does not use: only the
+# headers amdgpu includes.
+/drivers/gpu/drm/amd/
+!/drivers/gpu/drm/amd/amdkfd/*
+/drivers/gpu/drm/amd/amdkfd/*.h
