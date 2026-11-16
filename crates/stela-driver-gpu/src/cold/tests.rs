@@ -272,6 +272,64 @@ fn a_radeon_takes_the_same_cold_handoff() {
     drop(failure(Cold::new(inputs).quiesce_and_bind()));
     assert!(state.borrow().events.is_empty());
 }
+/// AMD fork (J6): a Radeon without a function-local reset starts unreset,
+/// even untranslated with a bus reset on offer: amdgpu resets it itself.
+#[test]
+fn a_radeon_without_a_function_reset_is_left_to_amdgpu() {
+    let (mut inputs, state) = inputs_for(0x7550_1002);
+    {
+        let words = &mut inputs.requester.function.config().words;
+        words[0x44 / 4] = 0;
+        words[0x84 / 4] = 8;
+    }
+    state.borrow_mut().bus_reset = true;
+    let candidate = check_candidate(
+        &mut inputs.requester.function,
+        &PhysicalTimer(state.clone()),
+        false,
+        true,
+    );
+    assert_eq!(candidate, Ok(None));
+    let ready = Cold::new(inputs)
+        .quiesce_and_bind()
+        .unwrap_or_else(|error| panic!("{:?}", error.error));
+    assert_eq!(ready.reset(), None);
+    assert_eq!(state.borrow().events, ["views-seal", "root-drain", "bind"]);
+}
+/// AMD fork: a Radeon without a function reset is never reset through its
+/// bus; translated, it starts as left, and untranslated it is refused.
+#[test]
+fn a_radeon_is_never_reset_through_its_bus() {
+    for translated in [true, false] {
+        let (mut inputs, state) = inputs_for(0x7550_1002);
+        {
+            let words = &mut inputs.requester.function.config().words;
+            words[0x44 / 4] = 0;
+            words[0x84 / 4] = 8;
+        }
+        state.borrow_mut().bus_reset = true;
+        let candidate = check_candidate(
+            &mut inputs.requester.function,
+            &PhysicalTimer(state.clone()),
+            translated,
+            true,
+        );
+        if !translated {
+            assert_eq!(candidate, Err(Error::ResetUnavailable));
+            continue;
+        }
+        assert_eq!(candidate, Ok(None));
+        // SAFETY: the symbolic domain stands for a translating one.
+        let ready = unsafe { Cold::new(inputs).translated() }
+            .quiesce_and_bind()
+            .unwrap_or_else(|error| panic!("{:?}", error.error));
+        assert_eq!(ready.reset(), None);
+        assert_eq!(
+            state.borrow().events,
+            ["views-seal", "root-drain", "bind"]
+        );
+    }
+}
 #[test]
 fn preflight_never_seals_or_resets_an_unsupported_or_foreign_source() {
     for case in 0..4 {

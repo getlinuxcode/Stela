@@ -192,6 +192,11 @@ fn preflight<C: ConfigSpace>(
     if !matches!(function.vendor, NVIDIA | AMD) || function.class[0] != DISPLAY {
         return Err(Error::Identity);
     }
+    // AMD fork: a Navi 48 lent to a VM did not bring its link back after a
+    // Secondary Bus Reset (the Radeon reset bug). A Radeon is never reset
+    // through its bus: amdgpu resets it itself (PSP mode 1) as it starts,
+    // and without a function reset it starts as left, with translation.
+    let bus_reset = bus_reset && function.vendor != AMD;
     requester::validate_stopped(function).map_err(Error::Claim)?;
     let mut express = None;
     for entry in capability::capabilities(function.config()) {
@@ -211,6 +216,12 @@ fn preflight<C: ConfigSpace>(
     // on.
     match function.reset_method().map_err(Error::Reset)? {
         Some(method) => Ok(Some(Reset::Function(method))),
+        // AMD fork (J6): a Radeon without a function-local reset is not
+        // reset through its bus, which a Navi 48 does not come back from
+        // (its link stays down, as the first VM trial saw). amdgpu resets
+        // it itself, through its PSP (mode 1), when it finds the firmware
+        // an earlier driver left running, as it does under Linux.
+        None if function.vendor == AMD => Ok(None),
         None if bus_reset => Ok(Some(Reset::SecondaryBus)),
         None if translated => Ok(None),
         None => Err(Error::ResetUnavailable),
