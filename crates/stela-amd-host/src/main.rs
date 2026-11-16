@@ -36,6 +36,8 @@ mod device;
 mod suite;
 #[cfg(feature = "radv-host")]
 mod suite_render;
+#[cfg(feature = "radv-host")]
+mod suite_resources;
 mod sysfs;
 
 fn log(message: &str) {

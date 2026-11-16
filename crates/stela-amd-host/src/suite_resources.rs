@@ -1,0 +1,328 @@
+//! Textures and samplers of the suite's cases, as the Mac's runner makes
+//! them (`texture_descriptor`, `make_texture`, `regions_of`, `make_sampler`
+//! in `runner.m`): textures are private, their files hold every slice's
+//! levels with tight rows, loaded through a staging buffer and read back
+//! the same way.
+use super::suite::{Runner, Shared, named};
+use serde_json::Value;
+use stela_driver_gpu::metal::{
+    abi::{
+        BlitOption, CompareFunction, CpuCacheMode, HazardTrackingMode, ResourceOptions,
+        SamplerAddressMode, SamplerBorderColor, SamplerMinMagFilter, SamplerMipFilter, StorageMode,
+        SwizzleChannels, TextureType, TextureUsage,
+    },
+    binding::ResourceId,
+    command_buffer::{
+        CommandBuffer,
+        blit::{BlitTexture, BufferLayout, Region},
+    },
+    device::{SamplerId, TextureId},
+    error::{Error, Result},
+    pixel_format::PixelFormat,
+    resource::TextureDescriptor,
+    sampler::SamplerDescriptor,
+};
+
+/// The texture fields this runner reproduces (`storage`, `row_padding` and
+/// `write_combined` change where the CPU reaches the texels, not what they
+/// hold, and this runner loads every texture through a blit).
+pub const TEXTURE: [&str; 13] = [
+    "array",
+    "depth",
+    "file",
+    "format",
+    "height",
+    "index",
+    "mipmaps",
+    "name",
+    "row_padding",
+    "storage",
+    "type",
+    "usage",
+    "width",
+];
+pub const SAMPLER: [&str; 13] = [
+    "address",
+    "anisotropy",
+    "border",
+    "compare",
+    "index",
+    "lod_average",
+    "lod_max",
+    "lod_min",
+    "mag",
+    "min",
+    "mip",
+    "name",
+    "normalized",
+];
+
+/// The texture types this runner makes.
+pub fn texture_type(name: &str) -> Option<TextureType> {
+    Some(match name {
+        "1d" => TextureType::D1,
+        "1d_array" => TextureType::D1Array,
+        "2d" => TextureType::D2,
+        "2d_array" => TextureType::D2Array,
+        "3d" => TextureType::D3,
+        "cube" => TextureType::Cube,
+        "cube_array" => TextureType::CubeArray,
+        _ => return None,
+    })
+}
+
+/// One level of one slice: where its texels sit in the case's file.
+pub struct Subresource {
+    pub slice: u64,
+    pub level: u64,
+    pub offset: u64,
+    pub bytes_per_row: u64,
+    pub bytes_per_image: u64,
+    pub size: [u64; 3],
+}
+
+/// A texture the case made.
+pub struct Texture {
+    pub id: TextureId,
+    pub descriptor: TextureDescriptor,
+    /// Its binding index, for a compute or fragment function.
+    pub index: Option<u32>,
+}
+
+impl Texture {
+    /// Every slice's levels in the runner's order, and their total bytes.
+    pub fn regions(&self) -> (Vec<Subresource>, u64) {
+        let d = &self.descriptor;
+        let block = d.pixel_format.describe().block;
+        let cube = matches!(d.texture_type, TextureType::Cube | TextureType::CubeArray);
+        let slices = d.array_length * if cube { 6 } else { 1 };
+        let extent = |size: u64, level: u64| (size >> level).max(1);
+        let mut out = Vec::new();
+        let mut offset = 0;
+        for slice in 0..slices {
+            for level in 0..d.mipmap_level_count {
+                let size = [
+                    extent(d.width, level),
+                    extent(d.height, level),
+                    extent(d.depth, level),
+                ];
+                let bytes_per_row =
+                    size[0].div_ceil(u64::from(block.width)) * u64::from(block.bytes);
+                let bytes_per_image = bytes_per_row * size[1].div_ceil(u64::from(block.height));
+                out.push(Subresource {
+                    slice,
+                    level,
+                    offset,
+                    bytes_per_row,
+                    bytes_per_image,
+                    size,
+                });
+                offset += bytes_per_image * size[2];
+            }
+        }
+        (out, offset)
+    }
+}
+
+impl Runner<'_> {
+    /// Makes the case's textures, and records into `commands` a blit that
+    /// loads those with a file.
+    pub(crate) fn make_textures(
+        &mut self,
+        specs: &Value,
+        commands: &mut CommandBuffer,
+        buffers: &mut Vec<Shared>,
+    ) -> Result<Vec<(String, Texture)>> {
+        let mut textures = Vec::new();
+        let mut uploads = Vec::new();
+        for spec in specs.as_array().into_iter().flatten() {
+            let format = spec["format"].as_str().unwrap_or_default();
+            let pixel_format = named(PixelFormat::ALL, format).ok_or(Error::Unsupported(
+                "a pixel format this runner does not name",
+            ))?;
+            let texture_type = texture_type(spec["type"].as_str().unwrap_or("2d")).ok_or(
+                Error::Unsupported("a texture type this runner does not make"),
+            )?;
+            let mut usage = TextureUsage::EMPTY;
+            for item in spec["usage"].as_array().into_iter().flatten() {
+                usage |= match item.as_str() {
+                    Some("read") => TextureUsage::SHADER_READ,
+                    Some("write") => TextureUsage::SHADER_WRITE,
+                    Some("render") => TextureUsage::RENDER_TARGET,
+                    Some("atomic") => TextureUsage::SHADER_ATOMIC,
+                    Some("view") => TextureUsage::PIXEL_FORMAT_VIEW,
+                    _ => return Err(Error::Unsupported("a texture usage")),
+                };
+            }
+            if spec["usage"].is_null() {
+                usage = TextureUsage::SHADER_READ;
+            }
+            let number = |key: &str| spec[key].as_u64().unwrap_or(1);
+            let descriptor = TextureDescriptor {
+                texture_type,
+                pixel_format,
+                width: number("width"),
+                height: number("height"),
+                depth: number("depth"),
+                mipmap_level_count: number("mipmaps"),
+                sample_count: 1,
+                array_length: number("array"),
+                options: ResourceOptions {
+                    cpu_cache_mode: CpuCacheMode::DefaultCache,
+                    storage_mode: StorageMode::Private,
+                    hazard_tracking_mode: HazardTrackingMode::Default,
+                },
+                usage,
+                swizzle: SwizzleChannels::IDENTITY,
+            };
+            let id = self.device.new_texture(&descriptor)?;
+            let texture = Texture {
+                id,
+                descriptor,
+                index: spec["index"].as_u64().map(|index| index as u32),
+            };
+            if spec["file"].is_string() {
+                let data = self.input(spec)?;
+                let (_, total) = texture.regions();
+                if (data.len() as u64) < total {
+                    return Err(Error::Invalid("a texture input is short"));
+                }
+                let staging = self.shared(&data[..total as usize], total)?;
+                uploads.push((textures.len(), buffers.len()));
+                buffers.push(staging);
+            }
+            textures.push((
+                spec["name"].as_str().unwrap_or_default().to_owned(),
+                texture,
+            ));
+        }
+        if !uploads.is_empty() {
+            commands.begin_blit()?;
+            for (at, staging) in uploads {
+                let texture = &textures[at].1;
+                let (regions, _) = texture.regions();
+                for region in regions {
+                    let source = BufferLayout {
+                        buffer: self.device.buffer(buffers[staging].id)?,
+                        offset: region.offset,
+                        bytes_per_row: region.bytes_per_row,
+                        bytes_per_image: region.bytes_per_image,
+                    };
+                    let target = self.blit_texture(texture, &region)?;
+                    commands.copy_buffer_to_texture(
+                        &mut self.device.resolver(),
+                        source,
+                        target,
+                        whole(&region),
+                        BlitOption::EMPTY,
+                    )?;
+                }
+            }
+            commands.end_encoding(&mut self.device.resolver())?;
+        }
+        Ok(textures)
+    }
+
+    fn blit_texture<'t>(
+        &mut self,
+        texture: &'t Texture,
+        region: &Subresource,
+    ) -> Result<BlitTexture<'t>> {
+        Ok(BlitTexture {
+            image: self.device.texture_image(texture.id)?,
+            descriptor: &texture.descriptor,
+            storage: self
+                .device
+                .texel_storage(texture.id, region.level, region.slice)?,
+            blocks: self.device.texture_blocks(texture.id)?,
+        })
+    }
+
+    /// Records into `commands` the copy of `texture` into a new shared
+    /// buffer, which it returns.
+    pub(crate) fn read_back(
+        &mut self,
+        texture: &Texture,
+        commands: &mut CommandBuffer,
+    ) -> Result<Shared> {
+        let (regions, total) = texture.regions();
+        let readback = self.shared(&[], total)?;
+        for region in regions {
+            let source = self.blit_texture(texture, &region)?;
+            let layout = BufferLayout {
+                buffer: self.device.buffer(readback.id)?,
+                offset: region.offset,
+                bytes_per_row: region.bytes_per_row,
+                bytes_per_image: region.bytes_per_image,
+            };
+            commands.copy_texture_to_buffer(
+                &mut self.device.resolver(),
+                source,
+                whole(&region),
+                layout,
+                BlitOption::EMPTY,
+            )?;
+        }
+        Ok(readback)
+    }
+
+    /// Makes a sampler as the case describes it.
+    pub(crate) fn make_sampler(&mut self, spec: &Value) -> Result<(SamplerId, ResourceId)> {
+        let text =
+            |key: &str, default: &'static str| spec[key].as_str().unwrap_or(default).to_owned();
+        let filter = |name: String| {
+            named(SamplerMinMagFilter::ALL, &name).ok_or(Error::Unsupported("a sampler filter"))
+        };
+        let mip = match text("mip", "none").as_str() {
+            "none" => SamplerMipFilter::NotMipmapped,
+            name => named(SamplerMipFilter::ALL, name).ok_or(Error::Unsupported("a mip filter"))?,
+        };
+        let address: Vec<String> = match spec["address"].as_array() {
+            Some(modes) => modes
+                .iter()
+                .map(|m| m.as_str().unwrap_or_default().to_owned())
+                .collect(),
+            None => vec!["clamp_to_edge".to_owned()],
+        };
+        let mode = |at: usize| {
+            let name = &address[at.min(address.len() - 1)];
+            match name.as_str() {
+                "clamp_to_border" => Ok(SamplerAddressMode::ClampToBorderColor),
+                name => named(SamplerAddressMode::ALL, name)
+                    .ok_or(Error::Unsupported("a sampler address mode")),
+            }
+        };
+        let mut descriptor = SamplerDescriptor {
+            min_filter: filter(text("min", "nearest"))?,
+            mag_filter: filter(text("mag", "nearest"))?,
+            mip_filter: mip,
+            max_anisotropy: spec["anisotropy"].as_u64().unwrap_or(1),
+            address_modes: [mode(0)?, mode(1)?, mode(2)?],
+            border_color: named(
+                SamplerBorderColor::ALL,
+                &text("border", "transparent_black"),
+            )
+            .ok_or(Error::Unsupported("a border color"))?,
+            normalized_coordinates: spec["normalized"].as_bool().unwrap_or(true),
+            lod_min_clamp: spec["lod_min"].as_f64().unwrap_or(0.0) as f32,
+            lod_max_clamp: spec["lod_max"].as_f64().map_or(f32::MAX, |lod| lod as f32),
+            ..SamplerDescriptor::default()
+        };
+        if let Some(compare) = spec["compare"].as_str() {
+            descriptor.compare_function = named(CompareFunction::ALL, compare)
+                .ok_or(Error::Unsupported("a compare function"))?;
+        }
+        let id = self.device.new_sampler(&descriptor)?;
+        Ok((id, self.device.sampler_resource_id(id)?))
+    }
+}
+
+/// The whole of one subresource.
+fn whole(region: &Subresource) -> Region {
+    Region {
+        slice: region.slice,
+        level: region.level,
+        origin: [0; 3],
+        size: region.size,
+    }
+}
