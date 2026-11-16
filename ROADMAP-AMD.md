@@ -64,12 +64,14 @@ Fait sous Linux (Ubuntu 24.04, noyau 6.14, Mesa 25.2.8) :
 
 - J3 : les compilateurs de Stela sont construits avec la cible AMD et le frontal AIR (LLVM 23). La suite Metal tourne sur un Mac (M3 Pro, macOS 27.2.1) : 14 146 cas réussis, aucun échec. Les shaders de WindowServer, de CoreAnimation et de l'assistant de configuration compilent tous vers NIR pour gfx1201. Sur tout macOS, aucun refus n'est propre à AMD (`docs/amd/shaders.md`).
 
+- J4 : le vrai périphérique Metal de Stela tourne sur la 9070 XT, sous Linux, sur un RADV construit à partir du Mesa de Stela avec le compilateur Metal (`libstela_radv.so`). Le premier calcul et le premier rendu sont vérifiés (`docs/amd/device.md`). Les corrections d'outillage de J3 sont proposées à upstream ([tylertms/Stela#160](https://github.com/tylertms/Stela/pull/160)).
+
 À faire ensuite, dans cet ordre :
 
-1. J2 : suivre la revue de la PR upstream sur la topologie ([tylertms/Stela#158](https://github.com/tylertms/Stela/pull/158)).
-2. Proposer à upstream les corrections d'outillage trouvées en J3 : `offline` et `stela_metal_corpus`, les archives minces, `libdl.a`, `libm.a`. Puis ouvrir des tickets pour les familles de refus du frontal AIR.
-3. J4 : ouvrir le vrai périphérique Metal sur RADV (`stela-amd-host --device`). C'est là que le NIR de J3 descendra jusqu'au code machine gfx1201.
-4. J1, dernier point : le Ryzen 5 5600X n'a pas de puce graphique, et la 9070 XT est la seule sortie d'affichage. Avant le premier essai en VM, il faut ajouter une petite carte graphique pour l'écran de Linux, ou lancer l'essai par SSH et suivre la VM par VNC. Avec `--stop-desktop`, le bureau Linux s'arrête pendant l'essai. Noter ensuite combien d'essais d'affilée passent sans redémarrer l'hôte.
+1. Suivre la revue des PR upstream [tylertms/Stela#158](https://github.com/tylertms/Stela/pull/158) (topologie, maintenant vérifiée sur le matériel) et [tylertms/Stela#160](https://github.com/tylertms/Stela/pull/160) (outillage).
+2. J4 : écrire un exécuteur Linux du plan de la suite Metal (`metal-suite plan`), qui traduise chaque cas en appels au `Device`, et comparer ses résultats à ceux du Mac (14 146 cas). Mesurer au passage les alignements des surfaces linéaires.
+3. J3 : ouvrir à upstream des tickets pour les familles de refus du frontal AIR.
+4. J1, dernier point : le Ryzen 5 5600X n'a pas de puce graphique, et la 9070 XT est la seule sortie d'affichage. Avant le premier essai en VM, il faut ajouter une petite carte graphique pour l'écran de Linux, ou lancer l'essai par SSH et suivre la VM par VNC. L'utilisateur est maintenant dans le groupe `kvm`.
 
 ## Jalons
 
@@ -111,17 +113,21 @@ Sans GPU nécessaire. Mesure et commandes dans `docs/amd/shaders.md`.
 - [x] Extraire les bibliothèques Metal de WindowServer (SkyLight), CoreAnimation (QuartzCore) et de l'assistant de configuration : `metal-suite coverage` les copie depuis un Mac sous macOS 27.2.1.
 - [x] Les compiler toutes pour gfx1201 (`xtask/scripts/amd-macos-shaders.py`). Le corpus du démarrage passe en entier, sauf le constructeur BVH du ray tracing et une archive de CoreImage assemblée à l'exécution. Sur tout macOS, aucun refus n'est propre à AMD : gfx1201 et NVIDIA refusent les mêmes 13 319 points d'entrée sur 57 401.
 - [ ] Ouvrir à upstream un ticket par famille de refus du frontal AIR commun (`air.signature`, bfloat, accès volatils, budget de métadonnées…).
-- [ ] Descendre jusqu'à ACO : compiler ce NIR en code machine gfx1201, et étendre `coverage` à ce que le chemin ACO ne sait pas encore traduire. C'est à faire avec RADV, en J4.
+- [ ] Descendre jusqu'à ACO pour tout le corpus : RADV compile désormais le NIR de Stela en code machine gfx1201 (J4). Reste à le faire pour tous les shaders de macOS et à étendre `coverage` à ce qu'ACO refuse.
 
 **Terminé quand** tous les shaders de ce corpus compilent pour gfx1201, jusqu'au code machine. Le niveau NIR est atteint pour le corpus du démarrage.
 
-### J4 : La couche Metal de Stela tourne sur RADV sous Linux
+### J4 : La couche Metal de Stela tourne sur RADV sous Linux 🟡
 
-- [ ] Construire les compilateurs de Stela avec la cible AMD (`cargo xtask gpu fetch`, Mesa et ses patches, option `compilers=amd`).
-- [ ] Mode `--device` de `stela-amd-host` : ouvrir le vrai périphérique Metal (`NativeBackend` + `AirCompiler`) sur RADV, avec des noyaux internes compilés pour gfx1201.
-- [ ] Premier calcul : addition de deux buffers, résultat vérifié.
-- [ ] Premier rendu : un triangle dans une texture, comparé à une image de référence.
-- [ ] Faire tourner la suite `metal-suite` directement contre le service, sans macOS invité.
+Détails et commandes dans `docs/amd/device.md`.
+
+- [x] Construire les compilateurs de Stela avec la cible AMD (`cargo xtask gpu fetch`, Mesa et ses patches, option `compilers=amd`).
+- [x] Construire RADV à partir du Mesa de Stela, avec le compilateur Metal lié dans la même bibliothèque : `libstela_radv.so` (option Meson `radv-host`). Correctif RADV `third_party/patches/mesa/9001-radv-take-nir-stages.patch`, pour que RADV prenne le NIR d'un étage comme le fait NVK.
+- [x] Mode `--device` de `stela-amd-host` (fonctionnalité Cargo `radv-host`) : le vrai périphérique Metal (`NativeBackend` + `AirCompiler`) s'ouvre sur RADV, et la mémoire partagée passe par `/dev/udmabuf`.
+- [x] Premier calcul : 65 536 additions de flottants sur le GPU, résultat vérifié.
+- [x] Premier rendu : un triangle dans une texture RGBA8, vérifié par son aire et la couleur de ses coins. Une bande de lignes, dessinée par le même pipeline sans classe de topologie, vérifie la PR #158 sur le matériel.
+- [ ] Faire tourner la suite `metal-suite` directement contre le service, sans macOS invité. Il faut un exécuteur du plan côté Linux.
+- [ ] Mesurer les vrais alignements des surfaces linéaires sur RADV.
 
 **Terminé quand** la suite Metal passe sur la 9070 XT avec la même tolérance que sur NVIDIA.
 
