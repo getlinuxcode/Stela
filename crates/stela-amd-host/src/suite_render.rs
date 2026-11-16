@@ -56,7 +56,8 @@ const CASE: [&str; 22] = [
     "textures",
     "vertex",
 ];
-const RENDER: [&str; 54] = [
+const RENDER: [&str; 55] = [
+    "amplification",
     "tiles",
     "tile_size",
     "tile_memory",
@@ -150,7 +151,8 @@ const STENCIL: [&str; 14] = [
     "texture",
     "write_mask",
 ];
-const BUFFER: [&str; 15] = [
+const BUFFER: [&str; 16] = [
+    "no_copy",
     "untracked",
     "alias_of",
     "heap",
@@ -592,7 +594,9 @@ impl Runner<'_> {
                         .ok_or(Error::Unsupported("a primitive class"))?,
                     None => PrimitiveTopologyClass::Unspecified,
                 },
-                max_vertex_amplification_count: 1,
+                max_vertex_amplification_count: render["amplification"]["count"]
+                    .as_u64()
+                    .unwrap_or(1),
                 tessellation: if tess.is_object() {
                     tessellation(tess)?
                 } else {
@@ -703,6 +707,16 @@ impl Runner<'_> {
         self.device.begin_render(commands, &pass)?;
         commands.set_render_pipeline_state(&state)?;
         self.bind_render_tables(render, pipeline, [&vertex_linked, &fragment_linked], commands)?;
+        // Each view's offsets into the viewports and target layers.
+        if render["amplification"].is_object() {
+            let mappings: Vec<(u32, u32)> = render["amplification"]["mappings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|m| (m[0].as_u64().unwrap_or(0) as u32, m[1].as_u64().unwrap_or(0) as u32))
+                .collect();
+            commands.set_vertex_amplification(&mappings)?;
+        }
         if !tiles.is_empty() {
             self.bind_tile_resources(case, held, commands)?;
             self.dispatch_tiles(&tiles, true, commands)?;

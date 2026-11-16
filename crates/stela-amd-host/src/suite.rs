@@ -34,7 +34,7 @@ use stela_driver_gpu::metal::{
     vulkan::object::Semaphore,
 };
 
-const BASIC_CASE: [&str; 37] = [
+const BASIC_CASE: [&str; 40] = [
     "buffers",
     "constants",
     "stage_input",
@@ -72,10 +72,14 @@ const BASIC_CASE: [&str; 37] = [
     "uses",
     "pipeline_creation",
     "creation",
+    "imageblock",
+    "indirect",
+    "stage_in_region_buffer",
 ];
 /// `storage` and `write_combined` change where the CPU reaches a buffer,
 /// not what it holds.
-const BASIC_BUFFER: [&str; 15] = [
+const BASIC_BUFFER: [&str; 16] = [
+    "no_copy",
     "stage",
     "untracked",
     "alias_of",
@@ -157,7 +161,8 @@ fn sequence(case: &Value) -> bool {
     ];
     /// What steps add to a case of their kind: sequencing, and fences and
     /// resource uses that Stela's hazard tracking covers.
-    const STEP: [&str; 9] = [
+    const STEP: [&str; 10] = [
+        "queue",
         "barrier",
         "concurrent",
         "continue",
@@ -473,7 +478,11 @@ pub(crate) fn unmet(capabilities: &Capabilities, requires: &Value) -> Option<Str
                 c.supports_family(GpuFamily::Apple7) || c.supports_family(GpuFamily::Mac2)
             }
             // Counters, logging, amplification: this runner does not check them.
-            // As the Mac's runner: `samplesN`, whether textures take N samples.
+            // As the Mac's runner: `vertex_amplificationN` and `samplesN`.
+            _ if name.starts_with("vertex_amplification") => name
+                .trim_start_matches("vertex_amplification")
+                .parse()
+                .is_ok_and(|count| c.supports_vertex_amplification_count(count)),
             _ => name
                 .strip_prefix("samples")
                 .and_then(|count| count.parse().ok())
@@ -769,13 +778,41 @@ impl Runner<'_> {
         if step["execute_icb"].is_object() {
             return self.execute_icb(&step["execute_icb"], held, commands);
         }
+        // A kernel's explicit imageblock's width and height.
+        if let Some(block) = step["imageblock"].as_array() {
+            let at = |i: usize| block.get(i).and_then(Value::as_u64).unwrap_or(1);
+            commands.set_imageblock_size(at(0), at(1))?;
+        }
         let threads = Size {
             width: group[0],
             height: group[1],
             depth: group[2],
         };
-        if step["dispatch"] == "threads" {
+        let buffer_named = |runner: &Self, name: &str| -> Result<_> {
+            let at = *held
+                .named
+                .get(name)
+                .ok_or(Error::Invalid("a dispatch names no buffer"))?;
+            runner.device.buffer(held.buffers[at].id)
+        };
+        if step["indirect"].is_object() {
+            let indirect = &step["indirect"];
+            let arguments = buffer_named(self, indirect["buffer"].as_str().unwrap_or_default())?;
             if step["stage_input"].is_object() {
+                commands.set_stage_in_region([0; 3], grid)?;
+            }
+            return commands.dispatch_threadgroups_indirect(
+                &mut self.device.resolver(),
+                arguments,
+                indirect["offset"].as_u64().unwrap_or(0),
+                threads,
+            );
+        }
+        if step["dispatch"] == "threads" {
+            if let Some(name) = step["stage_in_region_buffer"].as_str() {
+                let region = buffer_named(self, name)?;
+                commands.set_stage_in_region_indirect(region, 0)?;
+            } else if step["stage_input"].is_object() {
                 commands.set_stage_in_region([0; 3], grid)?;
             }
             let grid = grid.map(|size| size as u32);

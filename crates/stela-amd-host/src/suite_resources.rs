@@ -26,7 +26,8 @@ use stela_driver_gpu::metal::{
 /// The texture fields this runner reproduces (`storage`, `row_padding` and
 /// `write_combined` change where the CPU reaches the texels, not what they
 /// hold, and this runner loads every texture through a blit).
-pub const TEXTURE: [&str; 19] = [
+pub const TEXTURE: [&str; 20] = [
+    "write_combined",
     "levels",
     "slices",
     "swizzle",
