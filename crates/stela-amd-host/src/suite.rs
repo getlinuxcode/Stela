@@ -34,7 +34,7 @@ use stela_driver_gpu::metal::{
     vulkan::object::Semaphore,
 };
 
-const BASIC_CASE: [&str; 22] = [
+const BASIC_CASE: [&str; 26] = [
     "buffers",
     "constants",
     "stage_input",
@@ -57,6 +57,10 @@ const BASIC_CASE: [&str; 22] = [
     "heaps",
     "use_heaps",
     "arguments",
+    "icbs",
+    "execute_icb",
+    "supports_icb",
+    "use",
 ];
 /// `storage` and `write_combined` change where the CPU reaches a buffer,
 /// not what it holds.
@@ -113,6 +117,10 @@ fn basic(case: &Value) -> bool {
         && only(case, &BASIC_CASE)
         && all("heaps", &super::suite_heaps::HEAP)
         && super::suite_arguments::supported(case)
+        && super::suite_icb::supported(case)
+        && super::suite_icb::execution_supported(&case["execute_icb"])
+        && super::suite_icb::supported(case)
+        && super::suite_icb::execution_supported(&case["execute_icb"])
         && all("buffers", &BASIC_BUFFER)
         && all("outputs", &BASIC_OUTPUT)
         && all("textures", &super::suite_resources::TEXTURE)
@@ -131,8 +139,8 @@ fn basic(case: &Value) -> bool {
 /// Whether the runner reproduces the sequence exactly: each step is a case
 /// of its kind it reproduces, over the case's resources.
 fn sequence(case: &Value) -> bool {
-    const CASE: [&str; 11] = [
-        "arguments", "buffers", "heaps", "kind", "library", "name", "outputs", "requires", "samplers", "steps",
+    const CASE: [&str; 12] = [
+        "arguments", "buffers", "heaps", "icbs", "kind", "library", "name", "outputs", "requires", "samplers", "steps",
         "textures",
     ];
     /// What steps add to a case of their kind: sequencing, and fences and
@@ -163,6 +171,8 @@ fn sequence(case: &Value) -> bool {
         && only(case, &CASE)
         && all(&case["heaps"], &super::suite_heaps::HEAP)
         && super::suite_arguments::supported(case)
+        && super::suite_icb::supported(case)
+        && super::suite_icb::execution_supported(&case["execute_icb"])
         && all(&case["buffers"], &BASIC_BUFFER)
         && all(&case["textures"], &super::suite_resources::TEXTURE)
         && case["textures"].as_array().into_iter().flatten().all(|t| {
@@ -324,6 +334,7 @@ pub(crate) struct Held {
     /// The sequence's events, by name.
     pub(crate) events: BTreeMap<String, Semaphore>,
     pub(crate) heaps: Vec<super::suite_heaps::Heap>,
+    pub(crate) icbs: Vec<(String, stela_driver_gpu::metal::indirect::IndirectCommandBufferId)>,
 }
 
 impl Held {
@@ -347,7 +358,7 @@ impl Held {
 }
 
 /// A kernel's stage input, as the runner's `stage_input_descriptor`.
-fn stage_input(spec: &Value) -> Result<StageInputDescriptor> {
+pub(crate) fn stage_input(spec: &Value) -> Result<StageInputDescriptor> {
     let number = |item: &Value, key: &str, default: u64| item[key].as_u64().unwrap_or(default);
     let mut attributes = Vec::new();
     for item in spec["attributes"].as_array().into_iter().flatten() {
@@ -561,6 +572,9 @@ impl Runner<'_> {
 
     /// Frees what a case made, and retires the imports so their pages unmap.
     pub(crate) fn release(&mut self, held: Held) {
+        for (_, icb) in &held.icbs {
+            let _ = self.device.destroy_indirect_command_buffer(*icb);
+        }
         for buffer in held.buffers {
             let _ = self.device.destroy_buffer(buffer.id);
         }
@@ -609,6 +623,7 @@ impl Runner<'_> {
                 resource,
             ));
         }
+        self.make_icbs(case, held)?;
         self.encode_arguments(case, held)?;
         let steps: Vec<&Value> = if sequence {
             case["steps"].as_array().into_iter().flatten().collect()
@@ -719,6 +734,9 @@ impl Runner<'_> {
         }
         commands.set_compute_pipeline_state(&state)?;
         self.bind_resources(step, held, commands, true)?;
+        if step["execute_icb"].is_object() {
+            return self.execute_icb(&step["execute_icb"], held, commands);
+        }
         let threads = Size {
             width: group[0],
             height: group[1],
@@ -761,7 +779,10 @@ impl Runner<'_> {
         group: [u64; 3],
         case: &Value,
     ) -> Result<ComputePipelineState> {
-        let shape = format!("{} {}", case["constants"], case["stage_input"]);
+        let shape = format!(
+            "{} {} {}",
+            case["constants"], case["stage_input"], case["supports_icb"]
+        );
         let key = (library.to_owned(), function.to_owned(), group, shape);
         if let Some(state) = self.pipelines.get(&key) {
             return Ok(state.clone());
@@ -782,7 +803,7 @@ impl Runner<'_> {
             max_total_threads_per_threadgroup: 0,
             stage_input,
             linked_functions: LinkedFunctions::default(),
-            support_indirect_command_buffers: false,
+            support_indirect_command_buffers: case["supports_icb"] == true,
             archives: PipelineArchives::default(),
         })?;
         let state = self.device.compute_pipeline_state(pipeline)?.clone();

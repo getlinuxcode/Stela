@@ -1525,10 +1525,10 @@ fn generated_layouts_are_created_once_per_key() {
         preferred: MemoryProperties::EMPTY,
         mapped: true,
     };
-    let (layout, requirements) = device.generated_layout(&key, None, 1, request).unwrap();
+    let (layout, requirements) = device.generated_layout(&key, None, None, 1, request).unwrap();
     assert_eq!((requirements.size, requirements.alignment), (64, 256));
     assert_eq!(
-        device.generated_layout(&key, None, 1, request).unwrap().0,
+        device.generated_layout(&key, None, None, 1, request).unwrap().0,
         layout
     );
     let wide = GeneratedLayoutKey {
@@ -1540,7 +1540,7 @@ fn generated_layouts_are_created_once_per_key() {
     };
     assert!(
         matches!(
-            device.generated_layout(&wide, None, 1, request),
+            device.generated_layout(&wide, None, None, 1, request),
             Err(Error::Unsupported(_))
         ),
         "more tokens than the device takes"
@@ -1549,7 +1549,7 @@ fn generated_layouts_are_created_once_per_key() {
     let beyond = limit.unwrap().max_sequences + 1;
     assert!(
         matches!(
-            device.generated_layout(&key, None, beyond, request),
+            device.generated_layout(&key, None, None, beyond, request),
             Err(Error::Unsupported(_))
         ),
         "more sequences than one execution runs"

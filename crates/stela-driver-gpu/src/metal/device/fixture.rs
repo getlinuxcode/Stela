@@ -505,6 +505,7 @@ impl Backend for MockBackend {
         &mut self,
         _: IndirectCommandsLayout,
         _: Option<ExecutionSet>,
+        _: Option<Pipeline>,
         sequences: u32,
         _: MemoryRequest,
     ) -> Result<Requirements> {

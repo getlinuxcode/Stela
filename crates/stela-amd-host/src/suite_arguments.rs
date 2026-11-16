@@ -19,7 +19,7 @@ pub fn supported(case: &Value) -> bool {
         only(a, &ARGUMENTS)
             && a["entries"].as_array().into_iter().flatten().all(|e| {
                 only(e, &ENTRY)
-                    && matches!(e["kind"].as_str(), Some("buffer" | "texture" | "sampler"))
+                    && matches!(e["kind"].as_str(), Some("buffer" | "texture" | "sampler" | "icb"))
             })
     })
 }
@@ -45,6 +45,15 @@ impl Runner<'_> {
                     }
                     Some("texture") => self.device.texture_resource_id(held.texture(name)?)?.0,
                     Some("sampler") => held.sampler(name)?.0,
+                    Some("icb") => {
+                        let id = held
+                            .icbs
+                            .iter()
+                            .find(|(n, _)| n == name)
+                            .map(|(_, id)| *id)
+                            .ok_or(Error::Invalid("an argument names no indirect command buffer"))?;
+                        self.device.indirect_command_buffer_resource_id(id)?
+                    }
                     _ => return Err(Error::Unsupported("an argument kind")),
                 };
                 let offset = e["offset"].as_u64().unwrap_or(0);

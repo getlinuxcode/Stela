@@ -25,6 +25,9 @@ pub struct GeneratedCommands {
     pub stages: ShaderStages,
     /// The execution set the layout's execution set token indexes.
     pub set: Option<ExecutionSet>,
+    /// Without a set, the pipeline bound when the commands execute
+    /// (`VkGeneratedCommandsPipelineInfoEXT`).
+    pub pipeline: Option<Pipeline>,
     pub layout: IndirectCommandsLayout,
     /// The sequences, `size` bytes from `address`.
     pub address: u64,

@@ -172,6 +172,7 @@ impl Resolver for MockResolver {
         &mut self,
         key: &GeneratedLayoutKey,
         _: Option<ExecutionSet>,
+        _: Option<Pipeline>,
         sequences: u32,
     ) -> Result<(IndirectCommandsLayout, Requirements)> {
         let index = match self.layouts.iter().position(|known| known == key) {

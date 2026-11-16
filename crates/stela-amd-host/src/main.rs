@@ -45,6 +45,8 @@ mod suite_constants;
 #[cfg(feature = "radv-host")]
 mod suite_heaps;
 #[cfg(feature = "radv-host")]
+mod suite_icb;
+#[cfg(feature = "radv-host")]
 mod suite_render;
 #[cfg(feature = "radv-host")]
 mod suite_resources;

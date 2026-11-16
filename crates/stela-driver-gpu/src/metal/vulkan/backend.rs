@@ -304,11 +304,13 @@ pub trait Backend {
     /// The size and alignment of the preprocess memory `sequences` of
     /// `layout` need (`vkGetGeneratedCommandsMemoryRequirementsEXT`), in
     /// memory of `request`; refused when no memory `request` allows can
-    /// hold it.
+    /// hold it. Without an execution set, `pipeline` is the one bound
+    /// when the commands execute, which the driver may size them by.
     fn generated_commands_requirements(
         &mut self,
         layout: IndirectCommandsLayout,
         set: Option<ExecutionSet>,
+        pipeline: Option<Pipeline>,
         sequences: u32,
         request: MemoryRequest,
     ) -> Result<Requirements>;

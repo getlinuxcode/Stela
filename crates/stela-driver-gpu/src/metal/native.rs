@@ -2837,18 +2837,23 @@ impl Backend for NativeBackend {
         &mut self,
         layout: IndirectCommandsLayout,
         set: Option<ExecutionSet>,
+        pipeline: Option<Pipeline>,
         sequences: u32,
         request: MemoryRequest,
     ) -> Result<Requirements> {
-        let needs = self
-            .generated()
-            .memory_requirements(layout.0, set.map(|set| set.0), sequences);
-        // Every type the request could allocate from must hold the memory.
-        let candidates = objects::memory_candidates(&self.snapshot.memory, u32::MAX, request);
-        if candidates
-            .iter()
-            .any(|&index| needs.memory_type_bits & 1 << index == 0)
-        {
+        let needs = self.generated().memory_requirements(
+            layout.0,
+            set.map(|set| set.0),
+            pipeline.map(|pipeline| pipeline.0),
+            sequences,
+        );
+        // A type the request allocates from must hold the memory. The chunks
+        // it preprocesses into are buffers of preprocess usage, which the
+        // driver keeps to such types (RADV: its 32-bit address types, which
+        // repeat the others).
+        let candidates =
+            objects::memory_candidates(&self.snapshot.memory, needs.memory_type_bits, request);
+        if candidates.is_empty() {
             return Err(Error::Unsupported(
                 "generated commands preprocessing in host-visible memory",
             ));

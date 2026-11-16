@@ -104,6 +104,31 @@ struct MemoryRequirementsInfo {
     max_draw_count: u32,
 }
 
+/// `VkGeneratedCommandsPipelineInfoEXT`: the pipeline generated commands
+/// without an execution set run with.
+#[repr(C)]
+struct PipelineInfo {
+    s_type: vk::StructureType,
+    p_next: *const c_void,
+    pipeline: vk::Pipeline,
+}
+
+impl PipelineInfo {
+    fn new(pipeline: Option<u64>) -> Option<Self> {
+        pipeline.map(|pipeline| Self {
+            s_type: s_type(13),
+            p_next: ptr::null(),
+            pipeline: vk::Handle::from_raw(pipeline),
+        })
+    }
+
+    /// The `pNext` of the info this chains to.
+    fn next(info: &Option<Self>) -> *const c_void {
+        info.as_ref()
+            .map_or(ptr::null(), |info| ptr::from_ref(info).cast())
+    }
+}
+
 /// `VkIndirectExecutionSetPipelineInfoEXT`.
 #[repr(C)]
 struct ExecutionSetPipelineInfo {
@@ -337,11 +362,15 @@ impl Fns {
         &self,
         layout: u64,
         set: Option<u64>,
+        pipeline: Option<u64>,
         sequences: u32,
     ) -> vk::MemoryRequirements {
+        // Without a set the spec asks for the pipeline, which RADV sizes the
+        // sequences by.
+        let pipeline = PipelineInfo::new(pipeline);
         let info = MemoryRequirementsInfo {
             s_type: s_type(2),
-            p_next: ptr::null(),
+            p_next: PipelineInfo::next(&pipeline),
             execution_set: set.unwrap_or(0),
             layout,
             max_sequence_count: sequences,
@@ -358,9 +387,10 @@ impl Fns {
     ///
     /// `buffer` is recording, with state valid for the generated commands.
     pub(super) unsafe fn execute(&self, buffer: vk::CommandBuffer, commands: &GeneratedCommands) {
+        let pipeline = PipelineInfo::new(commands.pipeline.map(|pipeline| pipeline.0));
         let info = GeneratedCommandsInfo {
             s_type: s_type(4),
-            p_next: ptr::null(),
+            p_next: PipelineInfo::next(&pipeline),
             shader_stages: vk::ShaderStageFlags::from_raw(commands.stages.bits()),
             execution_set: commands.set.map_or(0, |set| set.0),
             layout: commands.layout.0,

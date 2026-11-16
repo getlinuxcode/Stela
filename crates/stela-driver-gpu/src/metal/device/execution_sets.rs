@@ -272,6 +272,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         &mut self,
         key: &GeneratedLayoutKey,
         set: Option<ExecutionSet>,
+        pipeline: Option<Pipeline>,
         sequences: u32,
         request: MemoryRequest,
     ) -> Result<(IndirectCommandsLayout, Requirements)> {
@@ -301,7 +302,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         };
         let requirements = self
             .backend
-            .generated_commands_requirements(layout, set, sequences, request)?;
+            .generated_commands_requirements(layout, set, pipeline, sequences, request)?;
         Ok((layout, requirements))
     }
 }

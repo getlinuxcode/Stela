@@ -2637,10 +2637,11 @@ impl<B: Backend, C: Compiler> Resolver for DeviceResolver<'_, B, C> {
         &mut self,
         key: &GeneratedLayoutKey,
         set: Option<ExecutionSet>,
+        pipeline: Option<Pipeline>,
         sequences: u32,
     ) -> Result<(IndirectCommandsLayout, Requirements)> {
         self.device
-            .generated_layout(key, set, sequences, CHUNK_MEMORY)
+            .generated_layout(key, set, pipeline, sequences, CHUNK_MEMORY)
     }
 
     fn update_indirect_commands(

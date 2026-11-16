@@ -185,11 +185,12 @@ pub trait Resolver: ChunkSource {
 
     /// The indirect commands layout of `key`, created on first use, and the
     /// preprocess memory `sequences` sequences of it need with `set` in
-    /// upload memory.
+    /// upload memory; `pipeline` is the one bound without a set.
     fn generated_layout(
         &mut self,
         key: &device_generated::GeneratedLayoutKey,
         set: Option<ExecutionSet>,
+        pipeline: Option<Pipeline>,
         sequences: u32,
     ) -> Result<(IndirectCommandsLayout, Requirements)>;
 

@@ -29,10 +29,12 @@ use stela_driver_gpu::metal::{
         ColorAttachmentDescriptor, DepthStencilDescriptor, MAX_COLOR_ATTACHMENTS, RenderTargets,
         StageThreads, StencilDescriptor, TessellationDescriptor, depth_stencil,
     },
-    vertex::{Attribute, Layout, StepFunction, VertexDescriptor, VertexFormat},
+    vertex::{Attribute, Layout, STRIDE_DYNAMIC, StepFunction, VertexDescriptor, VertexFormat},
 };
 
-const CASE: [&str; 18] = [
+const CASE: [&str; 20] = [
+    "icbs",
+    "use",
     "arguments",
     "heaps",
     "use_heaps",
@@ -52,7 +54,9 @@ const CASE: [&str; 18] = [
     "textures",
     "vertex",
 ];
-const RENDER: [&str; 34] = [
+const RENDER: [&str; 36] = [
+    "execute_icb",
+    "supports_icb",
     "input_primitive",
     "mesh",
     "tessellation",
@@ -175,6 +179,8 @@ pub fn basic(case: &Value) -> bool {
         && only(render, &RENDER)
         && all(&case["heaps"], &super::suite_heaps::HEAP)
         && super::suite_arguments::supported(case)
+        && super::suite_icb::supported(case)
+        && super::suite_icb::execution_supported(&render["execute_icb"])
         && (render["tessellation"].is_null() || only(&render["tessellation"], &TESSELLATION))
         && (render["mesh"].is_null() || only(&render["mesh"], &MESH))
         && all(&render["colors"], &COLOR)
@@ -319,12 +325,15 @@ fn vertex_descriptor(spec: &Value) -> Result<VertexDescriptor> {
             "patch_control_point" => StepFunction::PerPatchControlPoint,
             _ => return Err(Error::Unsupported("a vertex step function")),
         };
-        if item["stride"].is_string() {
-            return Err(Error::Unsupported("a dynamic vertex stride"));
-        }
+        // A dynamic stride is the buffer binding's attribute stride.
+        let stride = match item["stride"].as_str() {
+            Some("dynamic") => STRIDE_DYNAMIC,
+            Some(_) => return Err(Error::Unsupported("a vertex stride")),
+            None => number(item, "stride", 16),
+        };
         layouts.push(Layout {
             buffer_index: number(item, "buffer", 0) as u32,
-            stride: number(item, "stride", 16),
+            stride,
             step_function,
             step_rate: if step == "constant" {
                 0
@@ -561,7 +570,7 @@ impl Runner<'_> {
                 },
                 vertex_linked_functions: LinkedFunctions::default(),
                 fragment_linked_functions: LinkedFunctions::default(),
-                support_indirect_command_buffers: false,
+                support_indirect_command_buffers: render["supports_icb"] == true,
                 archives: PipelineArchives::default(),
             })?,
             None => {
@@ -747,6 +756,10 @@ impl Runner<'_> {
                 .ok_or(Error::Invalid("a draw names no buffer"))?;
             self.device.buffer(held.buffers[at].id)
         };
+        if render["execute_icb"].is_object() {
+            self.execute_icb(&render["execute_icb"], held, commands)?;
+            return commands.end_encoding(&mut self.device.resolver());
+        }
         if mesh.is_object() {
             let size = |key: &str| -> [u32; 3] {
                 core::array::from_fn(|at| mesh[key][at].as_u64().unwrap_or(1) as u32)
