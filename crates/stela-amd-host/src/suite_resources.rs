@@ -26,8 +26,10 @@ use stela_driver_gpu::metal::{
 /// The texture fields this runner reproduces (`storage`, `row_padding` and
 /// `write_combined` change where the CPU reaches the texels, not what they
 /// hold, and this runner loads every texture through a blit).
-pub const TEXTURE: [&str; 13] = [
+pub const TEXTURE: [&str; 15] = [
     "array",
+    "samples",
+    "stencil_file",
     "depth",
     "file",
     "format",
@@ -67,6 +69,8 @@ pub fn texture_type(name: &str) -> Option<TextureType> {
         "3d" => TextureType::D3,
         "cube" => TextureType::Cube,
         "cube_array" => TextureType::CubeArray,
+        "2d_ms" => TextureType::D2Multisample,
+        "2d_ms_array" => TextureType::D2MultisampleArray,
         _ => return None,
     })
 }
@@ -89,11 +93,33 @@ pub struct Texture {
     pub index: Option<u32>,
 }
 
+/// Whether `format` holds depth and stencil, whose aspects copy apart.
+fn combined(format: PixelFormat) -> bool {
+    matches!(
+        format,
+        PixelFormat::Depth32FloatStencil8 | PixelFormat::Depth24UnormStencil8
+    )
+}
+
+/// The blit option that copies `aspect` of `format`, as the runner's
+/// `blit_option`.
+pub fn blit_option(format: PixelFormat, aspect: Option<&str>) -> BlitOption {
+    match (combined(format), aspect) {
+        (true, Some("stencil")) => BlitOption::STENCIL_FROM_DEPTH_STENCIL,
+        (true, _) => BlitOption::DEPTH_FROM_DEPTH_STENCIL,
+        (false, _) => BlitOption::EMPTY,
+    }
+}
+
 impl Texture {
-    /// Every slice's levels in the runner's order, and their total bytes.
-    pub fn regions(&self) -> (Vec<Subresource>, u64) {
+    /// Every slice's levels in the runner's order, and their total bytes, of
+    /// `aspect` of a depth and stencil format (depth without one).
+    pub fn regions(&self, aspect: Option<&str>) -> (Vec<Subresource>, u64) {
         let d = &self.descriptor;
-        let block = d.pixel_format.describe().block;
+        let mut block = d.pixel_format.describe().block;
+        if combined(d.pixel_format) {
+            block.bytes = if aspect == Some("stencil") { 1 } else { 4 };
+        }
         let cube = matches!(d.texture_type, TextureType::Cube | TextureType::CubeArray);
         let slices = d.array_length * if cube { 6 } else { 1 };
         let extent = |size: u64, level: u64| (size >> level).max(1);
@@ -165,7 +191,7 @@ impl Runner<'_> {
                 height: number("height"),
                 depth: number("depth"),
                 mipmap_level_count: number("mipmaps"),
-                sample_count: 1,
+                sample_count: number("samples"),
                 array_length: number("array"),
                 options: ResourceOptions {
                     cpu_cache_mode: CpuCacheMode::DefaultCache,
@@ -181,14 +207,20 @@ impl Runner<'_> {
                 descriptor,
                 index: spec["index"].as_u64().map(|index| index as u32),
             };
-            if spec["file"].is_string() {
-                let data = self.input(spec)?;
-                let (_, total) = texture.regions();
+            for (key, aspect) in [
+                ("file", spec["aspect"].as_str()),
+                ("stencil_file", Some("stencil")),
+            ] {
+                let Some(file) = spec[key].as_str() else {
+                    continue;
+                };
+                let data = self.input(&serde_json::json!({ "file": file }))?;
+                let (_, total) = texture.regions(aspect);
                 if (data.len() as u64) < total {
                     return Err(Error::Invalid("a texture input is short"));
                 }
                 let staging = self.shared(&data[..total as usize], total)?;
-                uploads.push((textures.len(), buffers.len()));
+                uploads.push((textures.len(), buffers.len(), aspect.map(str::to_owned)));
                 buffers.push(staging);
             }
             textures.push((
@@ -198,9 +230,10 @@ impl Runner<'_> {
         }
         if !uploads.is_empty() {
             commands.begin_blit()?;
-            for (at, staging) in uploads {
+            for (at, staging, aspect) in uploads {
                 let texture = &textures[at].1;
-                let (regions, _) = texture.regions();
+                let aspect = aspect.as_deref();
+                let (regions, _) = texture.regions(aspect);
                 for region in regions {
                     let source = BufferLayout {
                         buffer: self.device.buffer(buffers[staging].id)?,
@@ -214,7 +247,7 @@ impl Runner<'_> {
                         source,
                         target,
                         whole(&region),
-                        BlitOption::EMPTY,
+                        blit_option(texture.descriptor.pixel_format, aspect),
                     )?;
                 }
             }
@@ -243,9 +276,10 @@ impl Runner<'_> {
     pub(crate) fn read_back(
         &mut self,
         texture: &Texture,
+        aspect: Option<&str>,
         commands: &mut CommandBuffer,
     ) -> Result<Shared> {
-        let (regions, total) = texture.regions();
+        let (regions, total) = texture.regions(aspect);
         let readback = self.shared(&[], total)?;
         for region in regions {
             let source = self.blit_texture(texture, &region)?;
@@ -260,7 +294,7 @@ impl Runner<'_> {
                 source,
                 whole(&region),
                 layout,
-                BlitOption::EMPTY,
+                blit_option(texture.descriptor.pixel_format, aspect),
             )?;
         }
         Ok(readback)

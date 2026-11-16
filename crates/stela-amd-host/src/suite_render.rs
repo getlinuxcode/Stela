@@ -45,7 +45,9 @@ const CASE: [&str; 14] = [
     "textures",
     "vertex",
 ];
-const RENDER: [&str; 21] = [
+const RENDER: [&str; 23] = [
+    "alpha_to_coverage",
+    "samples",
     "base_instance",
     "blend_color",
     "colors",
@@ -68,9 +70,28 @@ const RENDER: [&str; 21] = [
     "viewport",
     "winding",
 ];
-const COLOR: [&str; 4] = ["blend", "clear", "texture", "write_mask"];
-const DEPTH: [&str; 4] = ["clear", "compare", "texture", "write"];
-const STENCIL: [&str; 12] = [
+const COLOR: [&str; 9] = [
+    "blend",
+    "clear",
+    "resolve",
+    "resolve_depth_plane",
+    "resolve_level",
+    "resolve_slice",
+    "store",
+    "texture",
+    "write_mask",
+];
+const DEPTH: [&str; 6] = [
+    "clear",
+    "compare",
+    "resolve",
+    "resolve_filter",
+    "texture",
+    "write",
+];
+const STENCIL: [&str; 14] = [
+    "resolve",
+    "resolve_filter",
     "back",
     "clear",
     "compare",
@@ -339,16 +360,43 @@ impl Runner<'_> {
                     c.get(channel).and_then(Value::as_f64).unwrap_or(0.0)
                 })
             });
-            colors[index] = Some(attachment(texture, clear, [0.0; 4]));
+            let mut request = attachment(texture, clear, [0.0; 4]);
+            if let Some(resolve) = spec["resolve"].as_str() {
+                let number = |key: &str| spec[key].as_u64().unwrap_or(0);
+                request.resolve = Some((
+                    Self::texture_named(held, resolve)?,
+                    number("resolve_level"),
+                    number("resolve_slice"),
+                    number("resolve_depth_plane"),
+                ));
+                request.store_action = if spec["store"] == "resolve" {
+                    StoreAction::MultisampleResolve
+                } else {
+                    StoreAction::StoreAndMultisampleResolve
+                };
+            }
+            colors[index] = Some(request);
         }
         let mut depth_stencil_descriptor = DepthStencilDescriptor::default();
+        let mut depth_filter = MultisampleDepthResolveFilter::Sample0;
+        let mut stencil_filter = MultisampleStencilResolveFilter::Sample0;
         let mut depth_attachment = None;
         let depth = &render["depth"];
         if depth.is_object() {
             let texture = Self::texture_named(held, depth["texture"].as_str().unwrap_or_default())?;
             targets.depth_attachment_pixel_format =
                 Some(self.device.texture_descriptor(texture)?.pixel_format);
-            depth_attachment = Some(attachment(texture, depth["clear"].as_f64(), 0.0));
+            let mut request = attachment(texture, depth["clear"].as_f64(), 0.0);
+            if let Some(resolve) = depth["resolve"].as_str() {
+                request.resolve = Some((Self::texture_named(held, resolve)?, 0, 0, 0));
+                request.store_action = StoreAction::StoreAndMultisampleResolve;
+                depth_filter = match depth["resolve_filter"].as_str().unwrap_or("sample0") {
+                    "min" => MultisampleDepthResolveFilter::Min,
+                    "max" => MultisampleDepthResolveFilter::Max,
+                    _ => MultisampleDepthResolveFilter::Sample0,
+                };
+            }
+            depth_attachment = Some(request);
             depth_stencil_descriptor.depth_compare_function = compare(depth, "always")?;
             depth_stencil_descriptor.depth_write_enabled = depth["write"].as_bool().unwrap_or(true);
         }
@@ -361,7 +409,15 @@ impl Runner<'_> {
             targets.stencil_attachment_pixel_format =
                 Some(self.device.texture_descriptor(texture)?.pixel_format);
             let clear = stencil["clear"].as_u64().map(|clear| clear as u32);
-            stencil_attachment = Some(attachment(texture, clear, 0));
+            let mut request = attachment(texture, clear, 0);
+            if let Some(resolve) = stencil["resolve"].as_str() {
+                request.resolve = Some((Self::texture_named(held, resolve)?, 0, 0, 0));
+                request.store_action = StoreAction::StoreAndMultisampleResolve;
+                if stencil["resolve_filter"] == "depth_resolved" {
+                    stencil_filter = MultisampleStencilResolveFilter::DepthResolvedSample;
+                }
+            }
+            stencil_attachment = Some(request);
             let face = |name: &str| {
                 if stencil[name].is_object() {
                     stencil_face(&stencil[name])
@@ -380,6 +436,9 @@ impl Runner<'_> {
         if render["rasterize"] == false {
             targets.rasterization_enabled = false;
         }
+        let samples = render["samples"].as_u64().unwrap_or(1);
+        targets.raster_sample_count = samples;
+        targets.alpha_to_coverage_enabled = render["alpha_to_coverage"] == true;
         let vertex_descriptor = if render["vertex_descriptor"].is_object() {
             Some(vertex_descriptor(&render["vertex_descriptor"])?)
         } else {
@@ -403,15 +462,19 @@ impl Runner<'_> {
         let pass = RenderPassRequest {
             color_attachments: colors,
             depth_attachment,
-            depth_resolve_filter: MultisampleDepthResolveFilter::Sample0,
+            depth_resolve_filter: depth_filter,
             stencil_attachment,
-            stencil_resolve_filter: MultisampleStencilResolveFilter::Sample0,
+            stencil_resolve_filter: stencil_filter,
             visibility_result_buffer: None,
             visibility_result_type: VisibilityResultType::Reset,
             render_target_array_length: 0,
             render_target_width: size(0),
             render_target_height: size(1),
-            default_raster_sample_count: u64::from(render["target_size"].is_array()),
+            default_raster_sample_count: if render["target_size"].is_array() {
+                samples
+            } else {
+                0
+            },
             tile_memory: Default::default(),
             sample_positions: Vec::new(),
             rasterization_rate_map: false,

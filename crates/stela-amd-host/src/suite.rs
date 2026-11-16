@@ -60,7 +60,9 @@ const BASIC_BUFFER: [&str; 6] = [
     "write_combined",
 ];
 /// Besides the bytes, what the check alone reads.
-pub(crate) const BASIC_OUTPUT: [&str; 11] = [
+pub(crate) const BASIC_OUTPUT: [&str; 13] = [
+    "as",
+    "aspect",
     "dtype",
     "expect",
     "expect_alternatives",
@@ -373,19 +375,22 @@ impl Runner<'_> {
         Ok(())
     }
 
-    /// Writes each output: a buffer's declared length, a texture's every
-    /// level of every slice with tight rows, as the runner's `store_outputs`.
+    /// Writes each output, to its `as` name if it has one: a buffer's
+    /// declared length, a texture's (or its aspect's) every level of every
+    /// slice with tight rows, as the runner's `store_outputs`.
     pub(crate) fn store_outputs(
         &self,
         case: &Value,
         held: &Held,
-        readbacks: &[(String, usize)],
+        readbacks: &[usize],
         out: &Path,
     ) -> Result<()> {
+        let mut readbacks = readbacks.iter();
         for output in case["outputs"].as_array().into_iter().flatten() {
             let name = output["name"].as_str().unwrap_or_default();
-            let bytes = if let Some((_, at)) = readbacks.iter().find(|r| r.0 == name) {
-                let buffer = &held.buffers[*at];
+            let bytes = if held.textures.iter().any(|(t, _)| t == name) {
+                let at = *readbacks.next().expect("one readback per texture output");
+                let buffer = &held.buffers[at];
                 buffer.bytes(buffer.length)
             } else if let Some(&at) = held.named.get(name) {
                 let buffer = &held.buffers[at];
@@ -395,39 +400,39 @@ impl Runner<'_> {
                     "an output is neither a buffer nor a texture",
                 ));
             };
-            fs::write(out.join(format!("{name}.bin")), bytes)
+            let file = output["as"].as_str().unwrap_or(name);
+            fs::write(out.join(format!("{file}.bin")), bytes)
                 .map_err(|_| Error::Invalid("cannot write an output"))?;
         }
         Ok(())
     }
 
-    /// Records the readback of each texture output; their buffers' indices.
+    /// Records the readback of each texture output, in order; their
+    /// buffers' indices.
     pub(crate) fn read_back_outputs(
         &mut self,
         case: &Value,
         held: &mut Held,
         commands: &mut CommandBuffer,
-    ) -> Result<Vec<(String, usize)>> {
+    ) -> Result<Vec<usize>> {
         let mut readbacks = Vec::new();
-        let names: Vec<String> = case["outputs"]
+        let outputs: Vec<(usize, Option<String>)> = case["outputs"]
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|o| o["name"].as_str().map(str::to_owned))
-            .filter(|name| held.textures.iter().any(|(t, _)| t == name))
+            .filter_map(|o| {
+                let name = o["name"].as_str()?;
+                let at = held.textures.iter().position(|(t, _)| t == name)?;
+                Some((at, o["aspect"].as_str().map(str::to_owned)))
+            })
             .collect();
-        if names.is_empty() {
+        if outputs.is_empty() {
             return Ok(readbacks);
         }
         commands.begin_blit()?;
-        for name in names {
-            let at = held
-                .textures
-                .iter()
-                .position(|(t, _)| *t == name)
-                .expect("named above");
-            let readback = self.read_back(&held.textures[at].1, commands)?;
-            readbacks.push((name, held.buffers.len()));
+        for (at, aspect) in outputs {
+            let readback = self.read_back(&held.textures[at].1, aspect.as_deref(), commands)?;
+            readbacks.push(held.buffers.len());
             held.buffers.push(readback);
         }
         commands.end_encoding(&mut self.device.resolver())?;
