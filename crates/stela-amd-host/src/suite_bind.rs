@@ -24,6 +24,8 @@ pub fn stages(item: &Value, compute: bool) -> Result<&'static [Stage]> {
         "both" => &[Stage::Vertex, Stage::Fragment],
         "object" => &[Stage::Object],
         "mesh" => &[Stage::Mesh],
+        // Tile resources bind with the tile dispatches (`suite_tile`).
+        "tile" => &[],
         _ => return Err(Error::Unsupported("a binding stage")),
     })
 }
@@ -32,7 +34,7 @@ pub fn stages(item: &Value, compute: bool) -> Result<&'static [Stage]> {
 pub fn stage_known(item: &Value) -> bool {
     matches!(
         item["stage"].as_str(),
-        None | Some("vertex" | "fragment" | "both" | "object" | "mesh")
+        None | Some("vertex" | "fragment" | "both" | "object" | "mesh" | "tile")
     )
 }
 

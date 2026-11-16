@@ -56,7 +56,11 @@ const CASE: [&str; 22] = [
     "textures",
     "vertex",
 ];
-const RENDER: [&str; 50] = [
+const RENDER: [&str; 54] = [
+    "tiles",
+    "tile_size",
+    "tile_memory",
+    "imageblock_sample_length",
     "vertex_function_groups",
     "fragment_function_groups",
     "vertex_visible_functions",
@@ -194,6 +198,7 @@ pub fn basic(case: &Value) -> bool {
     case["kind"] == "render"
         && only(case, &CASE)
         && only(render, &RENDER)
+        && all(&render["tiles"], &super::suite_tile::TILE)
         && super::suite_tables::supported(render, "vertex_")
         && super::suite_tables::supported(render, "fragment_")
         && all(&case["heaps"], &super::suite_heaps::HEAP)
@@ -574,6 +579,8 @@ impl Runner<'_> {
         let (vertex_links, vertex_linked) = self.linked_functions(library, render, "vertex_")?;
         let (fragment_links, fragment_linked) =
             self.linked_functions(library, render, "fragment_")?;
+        let targets_formats: [Option<stela_driver_gpu::metal::pixel_format::PixelFormat>; MAX_COLOR_ATTACHMENTS] =
+            core::array::from_fn(|at| targets.color_attachments[at].pixel_format);
         let pipeline = match vertex {
             Some(vertex) => self.device.new_render_pipeline(&RenderPipelineRequest {
                 vertex_function: vertex,
@@ -631,6 +638,7 @@ impl Runner<'_> {
             }
         };
         let state = self.device.render_pipeline_state(pipeline)?.clone();
+        let tiles = self.tile_pipelines(render, library, &constants, &targets_formats)?;
         // An array target renders layered, the vertex function choosing the
         // slice, unless the attachment names one.
         let mut layers = 0;
@@ -680,7 +688,7 @@ impl Runner<'_> {
             } else {
                 0
             },
-            tile_memory: Default::default(),
+            tile_memory: super::suite_tile::tile_memory(render),
             sample_positions: render["sample_positions"]
                 .as_array()
                 .into_iter()
@@ -695,6 +703,11 @@ impl Runner<'_> {
         self.device.begin_render(commands, &pass)?;
         commands.set_render_pipeline_state(&state)?;
         self.bind_render_tables(render, pipeline, [&vertex_linked, &fragment_linked], commands)?;
+        if !tiles.is_empty() {
+            self.bind_tile_resources(case, held, commands)?;
+            self.dispatch_tiles(&tiles, true, commands)?;
+            commands.set_render_pipeline_state(&state)?;
+        }
         commands.set_depth_stencil_state(Some(&depth_stencil(&depth_stencil_descriptor)))?;
         if let Some((front, back)) = references {
             commands.set_stencil_reference_values(front, back)?;
@@ -938,6 +951,7 @@ impl Runner<'_> {
                 )?;
             }
         }
+        self.dispatch_tiles(&tiles, false, commands)?;
         commands.end_encoding(&mut self.device.resolver())
     }
 }

@@ -52,6 +52,8 @@ mod suite_render;
 mod suite_resources;
 #[cfg(feature = "radv-host")]
 mod suite_tables;
+#[cfg(feature = "radv-host")]
+mod suite_tile;
 mod sysfs;
 
 fn log(message: &str) {
