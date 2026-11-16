@@ -19,7 +19,7 @@ use std::{
     time::Instant,
 };
 use stela_driver_gpu::metal::{
-    abi::{ArgumentBuffersTier, DispatchType, GpuFamily, ReadWriteTextureTier},
+    abi::{ArgumentBuffersTier, DispatchType, GpuFamily, IndexType, ReadWriteTextureTier},
     capabilities::{Capabilities, Size},
     command_buffer::{CommandBuffer, ComputePipelineState},
     device::{
@@ -27,10 +27,13 @@ use stela_driver_gpu::metal::{
         pipelines::{ComputePipelineRequest, LinkedFunctions, PipelineArchives},
     },
     error::{Error, Result},
+    vertex::{Attribute, StageInLayout, StageInStep, StageInputDescriptor, VertexFormat},
 };
 
-const BASIC_CASE: [&str; 15] = [
+const BASIC_CASE: [&str; 17] = [
     "buffers",
+    "constants",
+    "stage_input",
     "dispatch",
     "function",
     "grid",
@@ -94,6 +97,11 @@ fn basic(case: &Value) -> bool {
         })
         && all("samplers", &super::suite_resources::SAMPLER)
         && (case["dispatch"].is_null() || case["dispatch"] == "threads")
+        && (case["stage_input"].is_null()
+            || only(
+                &case["stage_input"],
+                &["attributes", "index_buffer", "index_type", "layouts"],
+            ))
 }
 
 /// Runs the selected cases of the suite in `dir`; `only` keeps the cases
@@ -180,8 +188,9 @@ pub(crate) struct Runner<'a> {
     pub(crate) exporter: &'a Exporter,
     pub(crate) plan_dir: PathBuf,
     libraries: BTreeMap<String, LibraryId>,
-    /// By library, function and threadgroup width, height and depth.
-    pipelines: BTreeMap<(String, String, [u64; 3]), ComputePipelineState>,
+    /// By library, function, threadgroup size, and the constants and stage
+    /// input the case gives, as JSON.
+    pipelines: BTreeMap<(String, String, [u64; 3], String), ComputePipelineState>,
     /// The next fake guest range index each import takes.
     pub(crate) next_import: u64,
 }
@@ -227,6 +236,59 @@ pub(crate) struct Held {
     pub(crate) named: BTreeMap<String, usize>,
     pub(crate) textures: Vec<(String, super::suite_resources::Texture)>,
     pub(crate) samplers: Vec<SamplerId>,
+}
+
+/// A kernel's stage input, as the runner's `stage_input_descriptor`.
+fn stage_input(spec: &Value) -> Result<StageInputDescriptor> {
+    let number = |item: &Value, key: &str, default: u64| item[key].as_u64().unwrap_or(default);
+    let mut attributes = Vec::new();
+    for item in spec["attributes"].as_array().into_iter().flatten() {
+        attributes.push(Attribute {
+            index: number(item, "index", 0) as u32,
+            format: named(
+                VertexFormat::ALL,
+                item["format"].as_str().unwrap_or_default(),
+            )
+            .ok_or(Error::Unsupported("an attribute format"))?,
+            offset: number(item, "offset", 0),
+            buffer_index: number(item, "buffer", 0) as u32,
+        });
+    }
+    let mut layouts = Vec::new();
+    for item in spec["layouts"].as_array().into_iter().flatten() {
+        let step = item["step"].as_str().unwrap_or("grid_x");
+        let step_function = match step {
+            "grid_x" => StageInStep::ThreadPositionInGridX,
+            "grid_y" => StageInStep::ThreadPositionInGridY,
+            "grid_x_indexed" => StageInStep::ThreadPositionInGridXIndexed,
+            "grid_y_indexed" => StageInStep::ThreadPositionInGridYIndexed,
+            "constant" => StageInStep::Constant,
+            _ => return Err(Error::Unsupported("a stage-in step function")),
+        };
+        if item["stride"].is_string() {
+            return Err(Error::Unsupported("a dynamic stage-in stride"));
+        }
+        layouts.push(StageInLayout {
+            buffer_index: number(item, "buffer", 0) as u32,
+            stride: number(item, "stride", 16),
+            step_function,
+            step_rate: if step == "constant" {
+                0
+            } else {
+                number(item, "rate", 1)
+            },
+        });
+    }
+    Ok(StageInputDescriptor {
+        attributes,
+        layouts,
+        index_type: if spec["index_type"] == "uint16" {
+            IndexType::UInt16
+        } else {
+            IndexType::UInt32
+        },
+        index_buffer_index: number(spec, "index_buffer", 0) as u32,
+    })
 }
 
 /// Whether the device has what `requires` names, as the runner's `unmet`:
@@ -412,7 +474,7 @@ impl Runner<'_> {
         };
         let grid = triple("grid", 1);
         let group = triple("threadgroup", 64);
-        let state = self.pipeline(library, function, group)?;
+        let state = self.pipeline(library, function, group, case)?;
 
         let mut commands = self.device.new_command_buffer();
         self.make_buffers(&case["buffers"], held)?;
@@ -449,6 +511,9 @@ impl Runner<'_> {
             depth: group[2],
         };
         if case["dispatch"] == "threads" {
+            if case["stage_input"].is_object() {
+                commands.set_stage_in_region([0; 3], grid)?;
+            }
             let grid = grid.map(|size| size as u32);
             commands.dispatch_threads(&mut self.device.resolver(), grid, threads)?;
         } else {
@@ -485,18 +550,28 @@ impl Runner<'_> {
         library: &str,
         function: &str,
         group: [u64; 3],
+        case: &Value,
     ) -> Result<ComputePipelineState> {
-        let key = (library.to_owned(), function.to_owned(), group);
+        let shape = format!("{} {}", case["constants"], case["stage_input"]);
+        let key = (library.to_owned(), function.to_owned(), group, shape);
         if let Some(state) = self.pipelines.get(&key) {
             return Ok(state.clone());
         }
         let library = self.library(library)?;
-        let function = self.device.new_function(library, function, Some(&[]))?;
+        let constants = super::suite_constants::values(&case["constants"])?;
+        let function = self
+            .device
+            .new_function(library, function, Some(&constants))?;
+        let stage_input = if case["stage_input"].is_object() {
+            Some(stage_input(&case["stage_input"])?)
+        } else {
+            None
+        };
         let pipeline = self.device.new_compute_pipeline(&ComputePipelineRequest {
             compute_function: function,
             threadgroup_size_is_multiple_of_thread_execution_width: false,
             max_total_threads_per_threadgroup: 0,
-            stage_input: None,
+            stage_input,
             linked_functions: LinkedFunctions::default(),
             support_indirect_command_buffers: false,
             archives: PipelineArchives::default(),

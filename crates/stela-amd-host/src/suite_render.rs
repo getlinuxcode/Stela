@@ -29,8 +29,9 @@ use stela_driver_gpu::metal::{
     vertex::{Attribute, Layout, StepFunction, VertexDescriptor, VertexFormat},
 };
 
-const CASE: [&str; 13] = [
+const CASE: [&str; 14] = [
     "buffers",
+    "constants",
     "fragment",
     "informational",
     "kind",
@@ -278,13 +279,14 @@ impl Runner<'_> {
 
         // The pipeline's targets and the pass's attachments.
         let library = self.library(case["library"].as_str().unwrap_or_default())?;
+        let constants = super::suite_constants::values(&case["constants"])?;
         let vertex = self.device.new_function(
             library,
             case["vertex"].as_str().unwrap_or_default(),
-            Some(&[]),
+            Some(&constants),
         )?;
         let fragment = match case["fragment"].as_str() {
-            Some(name) => Some(self.device.new_function(library, name, Some(&[]))?),
+            Some(name) => Some(self.device.new_function(library, name, Some(&constants))?),
             None => None,
         };
         let mut targets = RenderTargets::default();

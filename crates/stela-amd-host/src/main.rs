@@ -35,6 +35,8 @@ mod device;
 #[cfg(feature = "radv-host")]
 mod suite;
 #[cfg(feature = "radv-host")]
+mod suite_constants;
+#[cfg(feature = "radv-host")]
 mod suite_render;
 #[cfg(feature = "radv-host")]
 mod suite_resources;
