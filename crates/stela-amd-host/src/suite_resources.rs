@@ -26,7 +26,11 @@ use stela_driver_gpu::metal::{
 /// The texture fields this runner reproduces (`storage`, `row_padding` and
 /// `write_combined` change where the CPU reaches the texels, not what they
 /// hold, and this runner loads every texture through a blit).
-pub const TEXTURE: [&str; 20] = [
+pub const TEXTURE: [&str; 24] = [
+    "over_buffer",
+    "buffer",
+    "bytes_per_row",
+    "offset",
     "write_combined",
     "levels",
     "slices",
@@ -79,6 +83,7 @@ pub fn texture_type(name: &str) -> Option<TextureType> {
         "cube_array" => TextureType::CubeArray,
         "2d_ms" => TextureType::D2Multisample,
         "2d_ms_array" => TextureType::D2MultisampleArray,
+        "buffer" => TextureType::TextureBuffer,
         _ => return None,
     })
 }
@@ -164,6 +169,7 @@ impl Runner<'_> {
         specs: &Value,
         commands: &mut CommandBuffer,
         buffers: &mut Vec<Shared>,
+        buffer_names: &std::collections::BTreeMap<String, usize>,
     ) -> Result<Vec<(String, Texture)>> {
         let mut textures = Vec::new();
         let mut uploads = Vec::new();
@@ -212,6 +218,29 @@ impl Runner<'_> {
                 usage,
                 swizzle: SwizzleChannels::IDENTITY,
             };
+            // A linear texture over a buffer's bytes, or a texture buffer.
+            let over = spec["over_buffer"].as_str().or(spec["buffer"].as_str());
+            if let Some(name) = over {
+                let at = *buffer_names
+                    .get(name)
+                    .ok_or(Error::Invalid("a texture lies over no buffer"))?;
+                let mut descriptor = descriptor;
+                descriptor.options.storage_mode = StorageMode::Shared;
+                let bytes = u64::from(pixel_format.describe().block.bytes);
+                let id = self.device.new_texture_from_buffer(
+                    buffers[at].id,
+                    &descriptor,
+                    spec["offset"].as_u64().unwrap_or(0),
+                    spec["bytes_per_row"]
+                        .as_u64()
+                        .unwrap_or(descriptor.width * bytes),
+                )?;
+                textures.push((
+                    spec["name"].as_str().unwrap_or_default().to_owned(),
+                    Texture { id, descriptor },
+                ));
+                continue;
+            }
             let id = self.device.new_texture(&descriptor)?;
             let texture = Texture { id, descriptor };
             for (key, aspect) in [

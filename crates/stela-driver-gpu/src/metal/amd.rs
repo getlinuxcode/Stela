@@ -66,12 +66,15 @@ impl Chip {
     }
 }
 
-/// Row-pitch alignment for explicitly laid out linear images. addrlib needs
-/// 128 bytes for linear surfaces on GFX12 and 256 on GFX9-11; 256 satisfies
-/// both. To confirm against RADV's `VkSubresourceLayout` once it runs.
-const LINEAR_ROW_ALIGNMENT: u64 = 256;
-/// Offset alignment for binding a linear image inside a buffer, taken as the
-/// same conservative 256 bytes until RADV reports it on hardware.
+/// Row-pitch alignment for explicitly laid out linear images: addrlib's 128
+/// bytes for linear surfaces on GFX12 (256 on GFX9-11, which Stela does not
+/// admit). Measured on the RX 9070 XT (RADV GFX1201, `DRM_FORMAT_MOD_LINEAR`
+/// with an explicit layout): every multiple of 128 at least a row's bytes
+/// is accepted, and no other pitch.
+const LINEAR_ROW_ALIGNMENT: u64 = 128;
+/// Offset alignment for binding a linear image inside a buffer. Measured on
+/// the same card: the image's memory alignment and the plane offsets RADV
+/// accepts are multiples of 256 bytes.
 const LINEAR_OFFSET_ALIGNMENT: u64 = 256;
 /// RADV's sparse binding granularity is the 64 KiB page, matching Vulkan's
 /// standard sparse block shapes.

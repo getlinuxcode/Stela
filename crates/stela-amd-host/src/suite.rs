@@ -650,7 +650,8 @@ impl Runner<'_> {
         let mut commands = self.device.new_command_buffer();
         self.make_heaps(&case["heaps"], held)?;
         self.make_buffers(&case["buffers"], held)?;
-        held.textures = self.make_textures(&case["textures"], &mut commands, &mut held.buffers)?;
+        held.textures =
+            self.make_textures(&case["textures"], &mut commands, &mut held.buffers, &held.named)?;
         for spec in case["samplers"].as_array().into_iter().flatten() {
             let (id, resource) = self.make_sampler(spec)?;
             held.samplers.push((

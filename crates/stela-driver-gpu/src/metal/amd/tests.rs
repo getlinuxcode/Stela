@@ -79,7 +79,7 @@ fn platform_reports_placement_bandwidth_and_alignments() {
         slot.max_transfer_rate,
         32000 * 128 / 130 * 16 * 1_000_000 / 8
     );
-    assert_eq!(slot.linear_row_alignment, 256);
+    assert_eq!(slot.linear_row_alignment, 128);
     assert_eq!(slot.linear_offset_alignment, 256);
     assert_eq!(slot.sparse_page_bytes, 64 << 10);
 
@@ -94,11 +94,11 @@ fn platform_reports_placement_bandwidth_and_alignments() {
 }
 
 #[test]
-fn alignments_are_multiples_of_every_rdna_linear_pitch() {
-    // addrlib: 256 bytes on GFX9-11, 128 bytes on GFX12.
-    for pitch in [128, 256] {
-        assert_eq!(LINEAR_ROW_ALIGNMENT % pitch, 0);
-    }
+fn alignments_are_what_rdna4_linear_surfaces_need() {
+    // addrlib's linear pitch on GFX12, and RADV's linear memory alignment,
+    // both measured on the RX 9070 XT.
+    assert_eq!(LINEAR_ROW_ALIGNMENT % 128, 0);
+    assert_eq!(LINEAR_OFFSET_ALIGNMENT % 256, 0);
 }
 
 /// The derivation is vendor-neutral: over a driver that reports what NVK

@@ -64,11 +64,11 @@ Fait sous Linux (Ubuntu 24.04, noyau 6.14, Mesa 25.2.8) :
 
 - J3 : les compilateurs de Stela sont construits avec la cible AMD et le frontal AIR (LLVM 23). La suite Metal tourne sur un Mac (M3 Pro, macOS 27.2.1) : 14 146 cas réussis, aucun échec. Les shaders de WindowServer, de CoreAnimation et de l'assistant de configuration compilent tous vers NIR pour gfx1201. Sur tout macOS, aucun refus n'est propre à AMD (`docs/amd/shaders.md`).
 
-- J4 : le vrai périphérique Metal de Stela tourne sur la 9070 XT, sous Linux, sur un RADV construit à partir du Mesa de Stela avec le compilateur Metal (`libstela_radv.so`). Le premier calcul et le premier rendu sont vérifiés, et 13 888 cas de la suite Metal (98,1 %) passent à l'identique du Mac : calculs, rendus, blits, séquences, bibliothèques compilées à l'exécution, tessellation, mesh, heaps, argument buffers, indirect command buffers, vues de textures, tables de fonctions et tuiles (`docs/amd/device.md`). En route, trois patchs RADV (`9001` à `9003`) et deux corrections de Stela : un scissor par viewport, et le pipeline transmis aux commandes générées par le GPU.
+- J4 : le vrai périphérique Metal de Stela tourne sur la 9070 XT, sous Linux, sur un RADV construit à partir du Mesa de Stela avec le compilateur Metal (`libstela_radv.so`). Le premier calcul et le premier rendu sont vérifiés, et 13 891 cas de la suite Metal (98,1 %) passent à l'identique du Mac : calculs, rendus, blits, séquences, bibliothèques compilées à l'exécution, tessellation, mesh, heaps, argument buffers, indirect command buffers, vues de textures, tables de fonctions et tuiles (`docs/amd/device.md`). En route, trois patchs RADV (`9001` à `9003`) et deux corrections de Stela : un scissor par viewport, et le pipeline transmis aux commandes générées par le GPU.
 
 À faire ensuite, dans cet ordre :
 
-1. J4 : comprendre les deux tracés encodés par le GPU qui ne tracent rien (commandes générées de rendu de RADV), et mesurer les alignements des surfaces linéaires. Les 82 cas restants sous Linux testent surtout les API de Metal (réflexion, bibliothèques dynamiques, argument encoders, écouteurs d'événements…).
+1. J6 : porter amdgpu dans Stela, mis au point en VM avec la carte prêtée. J4 est terminé : 13 891 cas de la suite Metal (98,1 %) identiques au Mac, alignements linéaires mesurés.
 2. J1 : le premier essai en VM est fait (trois démarrages d'affilée, carte rendue à chaque fois). On ne poursuit pas en VM : la suite se fera en démarrant le PC sur Stela, ce qui montrera l'écran de démarrage nommer la carte.
 
 ## Jalons
@@ -115,7 +115,7 @@ Sans GPU nécessaire. Mesure et commandes dans `docs/amd/shaders.md`.
 
 **Terminé quand** tous les shaders de ce corpus compilent pour gfx1201, jusqu'au code machine. Le niveau NIR est atteint pour le corpus du démarrage.
 
-### J4 : La couche Metal de Stela tourne sur RADV sous Linux 🟡
+### J4 : La couche Metal de Stela tourne sur RADV sous Linux ✅
 
 Détails et commandes dans `docs/amd/device.md`.
 
@@ -129,8 +129,8 @@ Détails et commandes dans `docs/amd/device.md`.
 - [x] Bibliothèques compilées à l'exécution : compilées à l'avance sur le Mac (`xtask/scripts/amd-runtime-libraries.py`), 734 cas de plus, tous identiques au Mac. 13 582 cas en tout (95,9 %).
 - [x] Indirect command buffers, tessellation, mesh, heaps, argument buffers de Tier 2, vues de textures et état de rendu dans l'exécuteur : 13 829 cas identiques au Mac (97,6 %). Corrections en route : patchs RADV `9002` (résolution dans un plan 3D) et `9003` (accès non uniformes), un scissor par viewport, et le pipeline transmis aux commandes générées par le GPU sans ensemble d'exécution.
 - [x] Tables de fonctions visibles, fonctions liées, tuiles, imageblocks, amplification de sommets, dispatches indirects : 13 888 cas identiques au Mac (98,1 %), sur une exécution complète et neuve.
-- [ ] Comprendre les deux tracés encodés par le GPU qui ne tracent rien. Les 82 cas restants sous Linux testent surtout les API de Metal (réflexion, bibliothèques dynamiques, argument encoders, écouteurs d'événements…), et les familles `host` et `framework` (125 cas) demandent macOS : J7.
-- [ ] Mesurer les vrais alignements des surfaces linéaires sur RADV.
+- [x] Mesurer les vrais alignements des surfaces linéaires sur RADV (16 novembre 2026) : pas de ligne multiple de 128 octets, décalage et mémoire alignés sur 256 octets (`metal/amd.rs`). Textures linéaires et texture buffers ajoutés à l'exécuteur : 13 891 cas identiques au Mac (98,1 %).
+- Reportés, sans bloquer J5 et J6 : les deux tracés encodés par le GPU qui ne tracent rien (commandes générées de rendu de RADV, avec un ensemble d'exécution ou un pas de sommets dynamique), à reprendre en J7 avec RADV dans l'image ; les 79 cas sous Linux qui testent surtout les API de Metal (réflexion, bibliothèques dynamiques, argument encoders, écouteurs d'événements…) et les familles `host` et `framework` (125 cas), qui demandent macOS (J7).
 
 **Terminé quand** la suite Metal passe sur la 9070 XT avec la même tolérance que sur NVIDIA.
 
