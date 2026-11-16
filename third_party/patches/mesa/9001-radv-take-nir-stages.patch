@@ -1,4 +1,4 @@
-From 4e55f34fe17f2bd513d65ba773c303e6553f1194 Mon Sep 17 00:00:00 2001
+From eda3c74a0f16bb7bb58e77bb727439d21d3bd351 Mon Sep 17 00:00:00 2001
 From: Stela contributor <contributor@example.invalid>
 Date: Mon, 16 Nov 2026 00:56:17 +0100
 Subject: [PATCH] radv: take a pipeline stage's NIR from
@@ -10,13 +10,15 @@ Stela's Metal device hands NVK. RADV initializes its stages itself and
 skipped such a stage; take its NIR as RADV's own internal NIR.
 
 Unlike RADV's meta shaders, such NIR has not been through the lowering
-RADV's SPIR-V path ends with: lower doubles and normalize sine and cosine
-for it, which ACO otherwise refuses (fsin).
+RADV's SPIR-V path does: turn the point coordinate and a fragment's
+primitive ID into inputs, take load_base_vertex as Vulkan's BaseVertex
+(load_first_vertex, as SPIR-V gives it), lower doubles and normalize sine
+and cosine, which ACO otherwise refuses.
 ---
  src/amd/vulkan/radv_pipeline.c | 10 +++++++++-
- src/amd/vulkan/radv_shader.c   |  7 +++++++
+ src/amd/vulkan/radv_shader.c   | 25 +++++++++++++++++++++++++
  src/amd/vulkan/radv_shader.h   |  2 ++
- 3 files changed, 18 insertions(+), 1 deletion(-)
+ 3 files changed, 36 insertions(+), 1 deletion(-)
 
 diff --git a/src/amd/vulkan/radv_pipeline.c b/src/amd/vulkan/radv_pipeline.c
 index c73afe0..714f183 100644
@@ -47,10 +49,29 @@ index c73afe0..714f183 100644
  
     const VkShaderDescriptorSetAndBindingMappingInfoEXT *mapping =
 diff --git a/src/amd/vulkan/radv_shader.c b/src/amd/vulkan/radv_shader.c
-index 312b7c0..626996c 100644
+index 312b7c0..f67a223 100644
 --- a/src/amd/vulkan/radv_shader.c
 +++ b/src/amd/vulkan/radv_shader.c
-@@ -490,6 +490,13 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct
+@@ -470,6 +470,18 @@ ycbcr_conversion_lookup(const void *data, uint32_t set, uint32_t binding, uint32
+    }
+ }
+ 
++/* Vulkan's BaseVertex, which SPIR-V gives RADV as load_first_vertex: NIR's
++ * load_base_vertex has OpenGL's meaning, which RADV does not implement. */
++static bool
++lower_base_vertex(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
++{
++   if (intrin->intrinsic != nir_intrinsic_load_base_vertex)
++      return false;
++   b->cursor = nir_before_instr(&intrin->instr);
++   nir_def_replace(&intrin->def, nir_load_first_vertex(b));
++   return true;
++}
++
+ nir_shader *
+ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct radv_shader_stage *stage,
+                          const struct radv_spirv_to_nir_options *options, bool is_internal)
+@@ -490,6 +502,19 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct
  
        assert(exec_list_length(&nir->functions) == 1);
        radv_shader_choose_subgroup_size(compiler_info, nir, &stage->key, 0);
@@ -58,6 +79,12 @@ index 312b7c0..626996c 100644
 +      /* NIR another frontend built for this Mesa skipped the lowering the
 +       * SPIR-V path ends with, which RADV's own NIR needs none of. */
 +      if (stage->external_nir) {
++         const struct nir_lower_sysvals_to_varyings_options sysvals_to_varyings = {
++            .point_coord = true,
++            .primitive_id = nir->info.stage == MESA_SHADER_FRAGMENT,
++         };
++         NIR_PASS(_, nir, nir_lower_sysvals_to_varyings, &sysvals_to_varyings);
++         NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_base_vertex, nir_metadata_control_flow, NULL);
 +         NIR_PASS(_, nir, nir_lower_doubles, NULL, nir->options->lower_doubles_options);
 +         NIR_PASS(_, nir, nir_normalize_sin_cos);
 +      }
