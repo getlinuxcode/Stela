@@ -3396,7 +3396,7 @@ static void
 attachment_texel(struct translator *t, nir_def **coord, nir_def **sample)
 {
    nir_builder *b = &t->b;
-   nir_def *xy = nir_f2i32(b, nir_trim_vector(b, nir_load_frag_coord(b), 2));
+   nir_def *xy = nir_f2i32(b, nir_trim_vector(b, nir_build_frag_coord(b, 4), 2));
    *coord = nir_vec4(b, nir_channel(b, xy, 0), nir_channel(b, xy, 1), nir_load_layer_id(b),
                      nir_imm_int(b, 0));
    *sample = t->stage_options->samples > 1 ? nir_load_sample_id(b) : nir_imm_int(b, 0);
@@ -3838,7 +3838,7 @@ fragment_imageblock_prelude(struct translator *t)
    nir_def *samples = device_value(t, STELA_AIR_SAMPLE_COUNT);
    if (!samples || !(t->imageblock_pass = device_value(t, STELA_AIR_IMAGEBLOCK)))
       return false;
-   t->imageblock_pixel = nir_f2u32(b, nir_trim_vector(b, nir_load_frag_coord(b), 2));
+   t->imageblock_pixel = nir_f2u32(b, nir_trim_vector(b, nir_build_frag_coord(b, 4), 2));
    nir_def *all = nir_iadd_imm(b, nir_ishl(b, nir_imm_int(b, 1), samples), -1);
    t->imageblock_mask = nir_iand(b, nir_load_sample_mask_in(b), all);
    t->fragment_imageblock = true;
@@ -4064,7 +4064,7 @@ fragment_tests_begin(struct translator *t, struct fragment_tests *tests)
       return fail(t, STELA_AIR_ARGUMENT, "the fragment tests' state is not supplied");
    if (!tested_image(t, false, &tests->depth_image) || !tested_image(t, true, &tests->stencil_image))
       return false;
-   tests->frag = nir_load_frag_coord(b);
+   tests->frag = nir_build_frag_coord(b, 4);
    tests->z = nir_channel(b, tests->frag, 2);
    tests->dzdx = nir_ddx_fine(b, tests->z);
    tests->dzdy = nir_ddy_fine(b, tests->z);
@@ -4573,7 +4573,7 @@ mark_dirty_tiles(struct translator *t)
    nir_builder *b = &t->b;
    b->cursor = nir_after_block_before_jump(nir_impl_last_block(impl));
    nir_def *stamp = nir_channel(b, t->dirty, 0), *marked = nir_channel(b, t->dirty, 1);
-   nir_def *tile = nir_ushr_imm(b, nir_f2u32(b, nir_trim_vector(b, nir_load_frag_coord(b), 2)),
+   nir_def *tile = nir_ushr_imm(b, nir_f2u32(b, nir_trim_vector(b, nir_build_frag_coord(b, 4), 2)),
                                 STELA_AIR_DIRTY_TILE_SHIFT);
    nir_def *coord = nir_vec4(b, nir_channel(b, tile, 0), nir_channel(b, tile, 1),
                              nir_imm_int(b, STELA_AIR_DIRTY_LAYER), nir_imm_int(b, 0));
@@ -4650,7 +4650,7 @@ stage_arguments(struct translator *t, LLVMValueRef fn)
          t->b.shader->info.fs.origin_upper_left = true;
          t->b.shader->info.fs.pixel_center_integer = false;
          if (!io->used) continue;
-         def = nir_load_frag_coord(&t->b);
+         def = nir_build_frag_coord(&t->b, 4);
       } else if (io->semantic == STELA_AIR_ATTACHMENT) {
          if (!(def = attachment_input(t, io)))
             return false;
@@ -9093,6 +9093,10 @@ speculatable(nir_instr *instr, const struct hoisting *h)
       case nir_intrinsic_load_barycentric_at_offset:
       case nir_intrinsic_load_barycentric_at_sample:
       case nir_intrinsic_load_frag_coord:
+      case nir_intrinsic_load_frag_coord_xy:
+      case nir_intrinsic_load_frag_coord_z:
+      case nir_intrinsic_load_frag_coord_w:
+      case nir_intrinsic_load_frag_coord_w_rcp:
       case nir_intrinsic_load_pixel_coord:
       case nir_intrinsic_load_push_constant:
       case nir_intrinsic_image_deref_size:
