@@ -147,6 +147,10 @@ pub(super) fn command(arguments: &Run, options: MachineOptions<'_>) -> Process {
         ));
     // An IOMMU precedes the PCI devices it translates for.
     match arguments.iommu {
+        // VFIO needs caching mode to see each mapping a guest adds.
+        Some(Iommu::Intel) if arguments.vfio_gpu.is_some() => {
+            command.args(["-device", "intel-iommu,intremap=off,caching-mode=on"])
+        }
         Some(Iommu::Intel) => command.args(["-device", "intel-iommu,intremap=off"]),
         Some(Iommu::Amd) => command.args(["-device", "amd-iommu,intremap=off"]),
         None => &mut command,

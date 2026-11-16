@@ -324,10 +324,7 @@ fn a_radeon_is_never_reset_through_its_bus() {
             .quiesce_and_bind()
             .unwrap_or_else(|error| panic!("{:?}", error.error));
         assert_eq!(ready.reset(), None);
-        assert_eq!(
-            state.borrow().events,
-            ["views-seal", "root-drain", "bind"]
-        );
+        assert_eq!(state.borrow().events, ["views-seal", "root-drain", "bind"]);
     }
 }
 #[test]

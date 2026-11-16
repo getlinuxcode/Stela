@@ -255,7 +255,9 @@ pub struct Run {
     /// a slot of their own behind a PCIe root port. The emulated VGA stays as
     /// the firmware's display, for a card with no monitor; one with a monitor
     /// takes the display. `xtask/scripts/vfio-gpu.sh` binds it for a run.
-    #[arg(long, requires = "kvm", conflicts_with = "iommu", value_parser = parse_pci_function)]
+    /// With `--iommu intel` (AMD fork), the card's DMA is translated by a
+    /// virtual VT-d in caching mode, which VFIO needs to follow its maps.
+    #[arg(long, requires = "kvm", value_parser = parse_pci_function)]
     vfio_gpu: Option<String>,
     /// Boot an existing USB disk image, such as a copy of a stick `stela
     /// setup` prepared, from its removable-media boot loader, attached as a
