@@ -24,3 +24,9 @@ option(
   value : '',
   description : 'Matching hosted Rust input static library for the optional Darwin Metal library assembler',
 )
+option(
+  'radv-host',
+  type : 'boolean',
+  value : false,
+  description : 'Build libstela_radv: RADV with the AIR compiler linked in, for the Metal device on Linux (requires amd and air-llvm-library)',
+)

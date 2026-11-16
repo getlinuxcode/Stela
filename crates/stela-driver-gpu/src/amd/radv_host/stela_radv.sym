@@ -1,0 +1,12 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+/* What libstela_radv exports: the Vulkan driver's entry points and the AIR
+ * compiler service, which share one NIR. */
+{
+  global:
+    vk_icdGetInstanceProcAddr;
+    vk_icdNegotiateLoaderICDInterfaceVersion;
+    vk_icdGetPhysicalDeviceProcAddr;
+    stela_*;
+  local:
+    *;
+};

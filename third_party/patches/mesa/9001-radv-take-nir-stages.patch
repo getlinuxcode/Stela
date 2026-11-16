@@ -1,0 +1,44 @@
+From 43bad78532eae85ff71db256d8b48d1f7334d3fd Mon Sep 17 00:00:00 2001
+From: Stela contributor <contributor@example.invalid>
+Date: Mon, 16 Nov 2026 00:56:17 +0100
+Subject: [PATCH] radv: take a pipeline stage's NIR from
+ VkPipelineShaderStageNirCreateInfoMESA
+
+The common runtime takes a stage that carries no module but this Mesa
+internal structure as its NIR (vk_pipeline_shader_stage_to_nir), which
+Stela's Metal device hands NVK. RADV initializes its stages itself and
+skipped such a stage; take its NIR as RADV's own internal NIR.
+---
+ src/amd/vulkan/radv_pipeline.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/src/amd/vulkan/radv_pipeline.c b/src/amd/vulkan/radv_pipeline.c
+index c73afe0..20d70f3 100644
+--- a/src/amd/vulkan/radv_pipeline.c
++++ b/src/amd/vulkan/radv_pipeline.c
+@@ -191,7 +191,12 @@ radv_pipeline_stage_init(VkPipelineCreateFlags2 pipeline_flags, const VkPipeline
+    const VkPipelineShaderStageModuleIdentifierCreateInfoEXT *iinfo =
+       vk_find_struct_const(sinfo->pNext, PIPELINE_SHADER_STAGE_MODULE_IDENTIFIER_CREATE_INFO_EXT);
+ 
+-   if (sinfo->module == VK_NULL_HANDLE && !minfo && !iinfo)
++   /* A stage built as NIR by the same Mesa, as the common runtime takes it
++    * (vk_pipeline_shader_stage_to_nir): RADV treats it as its own. */
++   const VkPipelineShaderStageNirCreateInfoMESA *nir_info =
++      vk_find_struct_const(sinfo->pNext, PIPELINE_SHADER_STAGE_NIR_CREATE_INFO_MESA);
++
++   if (sinfo->module == VK_NULL_HANDLE && !minfo && !iinfo && !nir_info)
+       return;
+ 
+    memset(out_stage, 0, sizeof(*out_stage));
+@@ -215,6 +220,8 @@ radv_pipeline_stage_init(VkPipelineCreateFlags2 pipeline_flags, const VkPipeline
+    } else if (minfo) {
+       out_stage->spirv.data = (const char *)minfo->pCode;
+       out_stage->spirv.size = minfo->codeSize;
++   } else if (nir_info) {
++      out_stage->internal_nir = nir_info->nir;
+    }
+ 
+    const VkShaderDescriptorSetAndBindingMappingInfoEXT *mapping =
+-- 
+2.43.0
+

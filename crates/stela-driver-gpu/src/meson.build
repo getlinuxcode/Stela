@@ -22,6 +22,11 @@ with_nvidia = compilers.contains('nvidia')
 with_amd = compilers.contains('amd')
 with_intel = compilers.contains('intel')
 with_amd_llvm = get_option('amd-llvm')
+# RADV itself, for the Metal device on Linux (amd/radv_host).
+with_radv_host = get_option('radv-host')
+if with_radv_host and not with_amd
+  error('radv-host requires the amd compilers')
+endif
 if with_amd_llvm and not with_amd
   error('amd-llvm requires the amd compilers')
 endif
@@ -31,7 +36,7 @@ endif
 if with_amd and host_machine.system() == 'darwin'
   add_global_arguments('-DHAVE_TSERVER', language : ['c', 'cpp'])
 endif
-if with_amd
+if with_amd and not with_radv_host
   # Mesa's AMD support code uses libdrm's types but Stela never calls libdrm,
   # which builds only on DRM systems: its headers alone, from the submodule.
   libdrm = '../../../third_party/libdrm'
@@ -54,7 +59,7 @@ mesa = subproject(
     'stela-compilers' : compilers,
     'platforms' : [],
     'gallium-drivers' : [],
-    'vulkan-drivers' : [],
+    'vulkan-drivers' : with_radv_host ? ['amd'] : [],
     'opengl' : false,
     'gles1' : 'disabled',
     'gles2' : 'disabled',
@@ -90,3 +95,6 @@ endif
 third_party = fs.parent(fs.parent(fs.parent(meson.project_source_root()))) / 'third_party'
 
 subdir('compiler')
+if with_radv_host
+  subdir('amd/radv_host')
+endif
