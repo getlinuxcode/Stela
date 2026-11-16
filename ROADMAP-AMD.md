@@ -20,7 +20,7 @@ Sans périphérique Metal, macOS ne démarre pas sous Stela : WindowServer s'arr
 
 - Le code AMD vit dans des fichiers à lui (`amdgpu_chip.rs`, `metal/amd/`, `stela-amd-host/`, et plus tard `amdgpu.rs`, `xtask/src/gpu/radv.rs`, `third_party/patches/amdgpu/`). On touche le moins possible aux fichiers d'upstream.
 - `upstream/main` est fusionné régulièrement par merge, jamais par rebase, avec `git rerere` activé.
-- Les correctifs qui ne concernent pas AMD repartent vers upstream sous forme de petites PR.
+- Le fork ne propose rien à upstream, ni PR ni ticket : ses correctifs, même ceux qui ne concernent pas AMD, restent dans le fork.
 - Matériel de référence : une seule RX 9070 XT, sans carte NVIDIA. macOS ne démarre pas avant le jalon 7.
 
 ## Développement en VM
@@ -64,14 +64,12 @@ Fait sous Linux (Ubuntu 24.04, noyau 6.14, Mesa 25.2.8) :
 
 - J3 : les compilateurs de Stela sont construits avec la cible AMD et le frontal AIR (LLVM 23). La suite Metal tourne sur un Mac (M3 Pro, macOS 27.2.1) : 14 146 cas réussis, aucun échec. Les shaders de WindowServer, de CoreAnimation et de l'assistant de configuration compilent tous vers NIR pour gfx1201. Sur tout macOS, aucun refus n'est propre à AMD (`docs/amd/shaders.md`).
 
-- J4 : le vrai périphérique Metal de Stela tourne sur la 9070 XT, sous Linux, sur un RADV construit à partir du Mesa de Stela avec le compilateur Metal (`libstela_radv.so`). Le premier calcul et le premier rendu sont vérifiés, et 12 848 cas de la suite Metal passent à l'identique du Mac : calculs, rendus, blits et séquences (`docs/amd/device.md`). Les corrections d'outillage de J3 sont proposées à upstream ([tylertms/Stela#160](https://github.com/tylertms/Stela/pull/160)).
+- J4 : le vrai périphérique Metal de Stela tourne sur la 9070 XT, sous Linux, sur un RADV construit à partir du Mesa de Stela avec le compilateur Metal (`libstela_radv.so`). Le premier calcul et le premier rendu sont vérifiés, et 12 848 cas de la suite Metal passent à l'identique du Mac : calculs, rendus, blits et séquences (`docs/amd/device.md`).
 
 À faire ensuite, dans cet ordre :
 
-1. Suivre la revue des PR upstream [tylertms/Stela#158](https://github.com/tylertms/Stela/pull/158) (topologie, maintenant vérifiée sur le matériel) et [tylertms/Stela#160](https://github.com/tylertms/Stela/pull/160) (outillage).
-2. J4 : étendre l'exécuteur Linux de la suite (`stela-amd-host --suite`) au reste du rendu (profondeur, stencil, sommets, multi-échantillonnage, échantillonneurs), puis aux textures et au reste. Mesurer au passage les alignements des surfaces linéaires. Proposer à upstream la largeur SIMD de 32 et `nir_build_frag_coord`.
-3. J3 : ouvrir à upstream des tickets pour les familles de refus du frontal AIR.
-4. J1, dernier point : le Ryzen 5 5600X n'a pas de puce graphique, et la 9070 XT est la seule sortie d'affichage. Avant le premier essai en VM, il faut ajouter une petite carte graphique pour l'écran de Linux, ou lancer l'essai par SSH et suivre la VM par VNC. L'utilisateur est maintenant dans le groupe `kvm`.
+1. J4 : étendre l'exécuteur Linux de la suite (`stela-amd-host --suite`) au reste du rendu (profondeur, stencil, sommets, multi-échantillonnage, échantillonneurs), puis aux textures et au reste. Mesurer au passage les alignements des surfaces linéaires.
+2. J1, dernier point : le Ryzen 5 5600X n'a pas de puce graphique, et la 9070 XT est la seule sortie d'affichage. Avant le premier essai en VM, il faut ajouter une petite carte graphique pour l'écran de Linux, ou lancer l'essai par SSH et suivre la VM par VNC. L'utilisateur est maintenant dans le groupe `kvm`.
 
 ## Jalons
 
@@ -100,7 +98,7 @@ Fait sous Linux (Ubuntu 24.04, noyau 6.14, Mesa 25.2.8) :
 - [x] Lancer l'outil sur la 9070 XT (Linux 6.12+, Mesa récent) et archiver sa sortie dans `docs/amd/qualification.md`.
 - [x] Lever le blocage `dynamicPrimitiveTopologyUnrestricted` : variantes de pipeline par classe de topologie quand le pilote ne fournit pas la propriété.
 - [x] Traiter chaque manque Metal attribué au pilote : tous sont des limites connues (RADV, matériel AMD, ou Stela pour tous les GPU), voir `docs/amd/qualification.md`.
-- [x] Proposer le correctif sur la topologie à upstream : [tylertms/Stela#158](https://github.com/tylertms/Stela/pull/158).
+- [x] Correctif sur la topologie vérifié sur le matériel (J4).
 - [ ] Remplacer les alignements estimés (256 octets) par les valeurs que RADV renvoie réellement.
 
 **Terminé quand** les fonctions requises sont présentes (19 depuis le correctif sur la topologie), l'import dma-buf aussi, et Metal3 + Apple7 sont atteints sur la vraie carte. C'est atteint depuis le 15 novembre 2026. Restent les manques Metal et les alignements.
@@ -112,7 +110,6 @@ Sans GPU nécessaire. Mesure et commandes dans `docs/amd/shaders.md`.
 - [x] Ajouter la cible AMD gfx1201 à `cargo xtask gpu metal-suite offline` : outil `stela_metal_corpus_amd`, option `--gpu`.
 - [x] Extraire les bibliothèques Metal de WindowServer (SkyLight), CoreAnimation (QuartzCore) et de l'assistant de configuration : `metal-suite coverage` les copie depuis un Mac sous macOS 27.2.1.
 - [x] Les compiler toutes pour gfx1201 (`xtask/scripts/amd-macos-shaders.py`). Le corpus du démarrage passe en entier, sauf le constructeur BVH du ray tracing et une archive de CoreImage assemblée à l'exécution. Sur tout macOS, aucun refus n'est propre à AMD : gfx1201 et NVIDIA refusent les mêmes 13 319 points d'entrée sur 57 401.
-- [ ] Ouvrir à upstream un ticket par famille de refus du frontal AIR commun (`air.signature`, bfloat, accès volatils, budget de métadonnées…).
 - [ ] Descendre jusqu'à ACO pour tout le corpus : RADV compile désormais le NIR de Stela en code machine gfx1201 (J4). Reste à le faire pour tous les shaders de macOS et à étendre `coverage` à ce qu'ACO refuse.
 
 **Terminé quand** tous les shaders de ce corpus compilent pour gfx1201, jusqu'au code machine. Le niveau NIR est atteint pour le corpus du démarrage.
@@ -125,7 +122,7 @@ Détails et commandes dans `docs/amd/device.md`.
 - [x] Construire RADV à partir du Mesa de Stela, avec le compilateur Metal lié dans la même bibliothèque : `libstela_radv.so` (option Meson `radv-host`). Correctif RADV `third_party/patches/mesa/9001-radv-take-nir-stages.patch`, pour que RADV prenne le NIR d'un étage comme le fait NVK.
 - [x] Mode `--device` de `stela-amd-host` (fonctionnalité Cargo `radv-host`) : le vrai périphérique Metal (`NativeBackend` + `AirCompiler`) s'ouvre sur RADV, et la mémoire partagée passe par `/dev/udmabuf`.
 - [x] Premier calcul : 65 536 additions de flottants sur le GPU, résultat vérifié.
-- [x] Premier rendu : un triangle dans une texture RGBA8, vérifié par son aire et la couleur de ses coins. Une bande de lignes, dessinée par le même pipeline sans classe de topologie, vérifie la PR #158 sur le matériel.
+- [x] Premier rendu : un triangle dans une texture RGBA8, vérifié par son aire et la couleur de ses coins. Une bande de lignes, dessinée par le même pipeline sans classe de topologie, vérifie sur le matériel le correctif sur la topologie (J2).
 - [x] Faire tourner la suite `metal-suite` directement contre le périphérique, sans macOS invité (`stela-amd-host --suite`) : 11 727 cas de calcul sur 11 727 identiques au Mac, aucun écart. Corrections en route : `sin` et `cos` dans RADV (patch `9001`), et largeur SIMD de 32 comme sur Apple (`capabilities::simd_width`).
 - [x] Rendu, blits et séquences dans l'exécuteur : 12 848 cas identiques au Mac. Il reste 13 écarts expliqués : filtrage anisotrope, PVRTC lu par le CPU, et cibles 10 bits avec une sortie en flottant 16 bits imposée par RB+. Corrections en route : patch RADV `9001` (coordonnée de point, `base_vertex`, lectures bornées), `nir_build_frag_coord` dans le frontal AIR.
 - [ ] Étendre l'exécuteur aux familles qui restent sous Linux : indirect command buffers, tessellation, argument buffers, tables de fonctions, tuiles, vues de textures, mesh… (400 cas), et compiler sur le Mac les bibliothèques `*_runtime_*` (737 cas). Les familles `host` et `framework` (125 cas) demandent macOS et passent en J7.
@@ -135,7 +132,7 @@ Détails et commandes dans `docs/amd/device.md`.
 
 ### J5 : Rejouer une vraie session macOS
 
-- [ ] Ajouter à upstream un enregistreur du trafic `wire` (requêtes et commandes encodées) entre macOS et le service. C'est utile aussi pour NVIDIA : candidat à une PR upstream.
+- [ ] Ajouter dans le fork un enregistreur du trafic `wire` (requêtes et commandes encodées) entre macOS et le service.
 - [ ] Rejoueur sous Linux : relit un enregistrement sur le service RADV, et compare les images présentées et les résultats de calcul.
 - [ ] Obtenir, via le Discord, un enregistrement complet sur une machine NVIDIA : démarrage, assistant de configuration, bureau, Finder, Safari.
 - [ ] Rejouer jusqu'à ce que l'écart soit nul ou dans les tolérances de Metal.
@@ -188,7 +185,6 @@ Le plus gros chantier. Mise au point dans la VM avec la carte prêtée (voir « 
 ## Questions ouvertes
 
 - RADV sur la couche de liaison existante (libdrm), ou une liaison propre à Stela ?
-- Ce fork reste-t-il indépendant à long terme, ou propose-t-on à terme une fusion de la partie AMD dans upstream ?
 - Prendre en charge RDNA 3 (RX 7000) une fois RDNA 4 stable ?
 
 ## Références

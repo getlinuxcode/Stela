@@ -13,7 +13,7 @@ RESULT: Stela's Metal device ran its work on the GPU.
 
 - **Calcul** : un noyau Metal additionne deux buffers de 65 536 flottants, et le CPU vérifie chaque valeur.
 - **Rendu** : un triangle aux sommets rouge, vert et bleu est dessiné dans une texture RGBA8, puis recopié dans un buffer partagé. Il couvre exactement l'aire attendue (18 432 pixels), et chaque coin a la couleur de son sommet.
-- **Topologie** : le même pipeline, sans classe de topologie, dessine une bande de lignes. Sur RADV, qui ne fournit pas `dynamicPrimitiveTopologyUnrestricted`, ce dessin passe par la variante « lignes » du correctif de [tylertms/Stela#158](https://github.com/tylertms/Stela/pull/158). Le correctif est donc vérifié sur le matériel.
+- **Topologie** : le même pipeline, sans classe de topologie, dessine une bande de lignes. Sur RADV, qui ne fournit pas `dynamicPrimitiveTopologyUnrestricted`, ce dessin passe par la variante « lignes » du correctif sur la topologie (J2). Ce correctif est donc vérifié sur le matériel.
 
 Les shaders sont dans `crates/stela-amd-host/metal/first.metal`, compilés en metallib sur un Mac.
 
