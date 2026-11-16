@@ -10,6 +10,10 @@ use super::*;
 const AMD: u16 = 0x1002;
 /// The register BAR of an RDNA GPU (amdgpu's `rmmio`, BAR 5 since Bonaire).
 const REGISTER_BAR: usize = 5;
+/// The DMA addresses an RDNA 4 GPU reaches: GMC v12 sets a 44-bit mask
+/// (`gmc_v12_0_sw_init`), which the device refuses below its placement's
+/// limit (the second trial: "No suitable DMA available").
+const DMA_LIMIT_RDNA4: u64 = (1 << 44) - 1;
 /// The Revision ID register in configuration space.
 const REVISION_ID: u16 = 0x08;
 
@@ -175,7 +179,7 @@ pub(super) fn claim(
         bus: address.bus,
         devfn: address.device << 3 | address.function,
         irq: line,
-        dma_limit: DMA_LIMIT,
+        dma_limit: DMA_LIMIT_RDNA4,
         ..Placement::default()
     };
     let (mut bars, mut resources) = (Vec::new(), ManuallyDrop::new(Vec::new()));

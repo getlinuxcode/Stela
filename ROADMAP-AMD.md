@@ -156,7 +156,7 @@ Le plus gros chantier. Mise au point dans la VM avec la carte prêtée (voir « 
 - [x] Créer `amdgpu.rs` (démarrage de l'image d'amdgpu, `amdgpu.runpm=0`). PCI, MMIO, DMA et pages passent par l'hôte commun de `engine/gpu.rs`, sans fichier `amd.rs`.
 - [ ] Firmwares : ajouter au provisionnement de `stela-cli` les fichiers `amdgpu/` de linux-firmware pour la Navi 48. Noms confirmés par le premier essai : `psp_14_0_3_sos.bin`, `smu_14_0_3.bin`, `dcn_4_0_1_dmcub.bin`, `gc_12_0_1_pfp.bin` (et les autres `gc_12_0_1_*`), `gc_12_0_1_uni_mes.bin`, `sdma_7_0_1.bin`, `vcn_5_0_0.bin`, chacun demandé à l'early_init de son bloc IP.
 - [ ] Démarrage côté Stela : réclamer les cartes AMD dans `engine/gpu.rs` et `engine/start.rs`, et donner les messages d'état AMD dans `gpu_status.rs`. Fait : `engine/gpu_amd.rs` prend la Radeon (BAR 5, passage à froid commun) et démarre l'image d'amdgpu (fonctionnalité `amdgpu`). L'option `--gpu-trial` démarre le GPU sans macOS, et `xtask/scripts/amd-gpu-trial.sh` fait l'essai en VM. Restent les messages d'état et le premier essai avec la carte.
-- [ ] Étapes d'initialisation à valider dans le journal : IP discovery (fait : 11 blocs IP et VBIOS lus en VM), PSP, SMU, file graphique MES, SDMA, puis le premier paquet de commandes exécuté.
+- [ ] Étapes d'initialisation à valider dans le journal : IP discovery (fait : 11 blocs IP et VBIOS lus en VM), chargement des 20 firmwares (fait : early_init complet), PSP, SMU, file graphique MES, SDMA, puis le premier paquet de commandes exécuté.
 - [ ] Affichage par DC/DCN via DRM, que `metal/kms.rs` utilise sans modification.
 
 **Terminé quand** amdgpu démarre la 9070 XT dans Stela et que la console passe sur l'écran géré par DCN.
