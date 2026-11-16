@@ -2695,7 +2695,8 @@ fn start_platform(
         _ => None,
     };
     crate::status::progress("clocks");
-    let clock = if options.boots_macos() {
+    // AMD fork: a GPU trial (`--gpu-trial`) starts the GPU, which needs it.
+    let clock = if options.boots_macos() || options.gpu_trial {
         // SAFETY: this BSP owns the existing timer/IDT before any driver,
         // and the HPET only after its whole-controller handoff above.
         unsafe { service_clock(handoff, host_owner, native_mmio) }

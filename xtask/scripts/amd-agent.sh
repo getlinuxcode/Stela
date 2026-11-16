@@ -8,7 +8,9 @@
 # included. A tmux session started from a terminal is not one of them:
 # logind keeps a user's processes when their session ends
 # (KillUserProcesses=no, the Debian and Mint default), so the agent keeps
-# working through the run, and the desktop comes back when it ends.
+# working through the run, and the desktop comes back when it ends. The
+# user's systemd manager, which tmux's scope belongs to, must linger, or it
+# stops with the last session (this script turns lingering on).
 #
 #   xtask/scripts/amd-agent.sh            start the session, or attach to it
 #   xtask/scripts/amd-agent.sh --resume   the same, resuming the last conversation
@@ -25,6 +27,12 @@ if [[ $(loginctl show-session "${XDG_SESSION_ID:-self}" -p Remote --value 2>/dev
    grep -Eq '^\s*KillUserProcesses\s*=\s*yes' /etc/systemd/logind.conf 2>/dev/null; then
   echo "amd-agent: logind kills a session's processes when it ends; the agent would not survive" >&2
   exit 1
+fi
+
+# Without lingering, systemd stops the user's manager when their last
+# session ends, and tmux's scope with it: keep it running (no root needed).
+if [[ $(loginctl show-user "$USER" -p Linger --value 2>/dev/null) != yes ]]; then
+  loginctl enable-linger "$USER" || { echo "amd-agent: run loginctl enable-linger $USER" >&2; exit 1; }
 fi
 
 # The CLI on PATH, else the one the desktop app ships (newest first).
