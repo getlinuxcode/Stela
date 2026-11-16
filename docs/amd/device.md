@@ -74,7 +74,10 @@ L'exécuteur prépare les ressources d'un cas, puis encode ses étapes. Un cas s
 - les calculs, avec textures, échantillonneurs, constantes de fonction, entrée d'étage et dispatch par fils ou par groupes ;
 - les rendus, avec attachements de couleur, de profondeur et de stencil, multi-échantillonnage et résolution, descripteurs de sommets, tracés indexés ou multiples, cibles en tableau, et l'état de l'encodeur (stencil, biais, élimination, viewport, scissor) ;
 - les blits ;
-- les séquences, qui enchaînent ces étapes avec de nouveaux command buffers et des événements.
+- les séquences, qui enchaînent ces étapes avec de nouveaux command buffers et des événements ;
+- la tessellation et le mesh (pipelines, tracés directs et indirects) ;
+- les heaps (automatiques ou à placement, partagés ou privés), les argument buffers de Tier 2 (adresses de buffers, identifiants de textures, d'échantillonneurs, d'indirect command buffers et de pipelines) et les indirect command buffers (commandes encodées par le CPU ou par le GPU, copiées, réinitialisées) ;
+- les vues de textures, les liaisons à un décalage, `inline` ou avec des bornes de LOD, plusieurs viewports, les résultats de visibilité et les tracés indirects.
 
 Les textures de tous les types que crée la suite (1D, 2D, 3D, cube, tableaux, multi-échantillonnées) sont chargées et relues niveau par niveau, et par aspect pour la profondeur et le stencil (`suite_resources.rs`). Les familles `host` (69 cas) et `framework` (56 cas) testent les API de macOS et les frameworks d'Apple : elles ne peuvent tourner qu'avec un macOS invité, en J7.
 
@@ -85,20 +88,24 @@ sg kvm -c "./target/release/stela-amd-host --suite .stela/metal-suite"
 cargo xtask gpu metal-suite check .stela/metal-suite/results/linux-gfx1201
 ```
 
-Mesure du 16 novembre 2026 :
+Mesure du 16 novembre 2026, sur une exécution complète et neuve de la suite :
 
 | | Cas |
 | --- | --- |
-| Identiques au Mac, dans ses tolérances | 13 582 (95,9 % de la suite) |
-| Écarts | 13, voir plus bas |
-| Non pris en charge | 6 : 3 bibliothèques d'exécution sans équivalent en ligne de commande (arrondi des conversions, threads requis) et 3 cas qui demandent une capacité que le périphérique n'annonce pas |
-| Pas encore exécutés | 523, dont 125 qui demandent macOS (`host`, `framework`) |
+| Identiques au Mac, dans ses tolérances | 13 829 (97,6 % de la suite) |
+| Écarts | 15, voir plus bas |
+| Non pris en charge | 13 : 3 bibliothèques d'exécution sans équivalent en ligne de commande (arrondi des conversions, threads requis) et 10 cas qui demandent une famille (Apple 9, Apple 10) ou une capacité que le périphérique n'annonce pas |
+| Pas encore exécutés | 266, dont 125 qui demandent macOS (`host`, `framework`) |
 
 Corrections faites en route, que RADV avec Stela demandait :
 
 - **Patch RADV `9001`.** Le NIR que Stela remet à RADV ne passe pas par les transformations de fin du chemin SPIR-V de RADV, et ACO refusait ce qui en dépend. Le patch applique désormais à ce NIR ce qu'il lui faut : coordonnée de point et identifiant de primitive en entrées, `load_base_vertex` pris comme le `BaseVertex` de Vulkan, lectures globales bornées protégées par un test, doubles abaissés, sinus et cosinus normalisés.
 - **Largeur SIMD.** Stela prenait `maxSubgroupSize` comme `threadExecutionWidth`, soit 64 sur RADV. Le code Metal écrit pour les GPU Apple compte sur des simdgroups de 32 : Stela prend maintenant 32 dès que le pilote le permet (`capabilities::simd_width`).
 - **Position du fragment.** Le frontal AIR construit maintenant la position avec `nir_build_frag_coord`, qui suit la forme demandée par le pilote (RADV : `xy`, `z` et `1/w` séparés).
+- **Résolution dans un plan 3D (patch RADV `9002`).** RADV résolvait la couleur d'un rendu dans le plan 0 d'une texture 3D, quel que soit le plan visé. Une telle résolution passe maintenant par le chemin de calcul, avec le plan en décalage z.
+- **Accès non uniformes (patch RADV `9003`).** Metal laisse chaque fil d'une wave lire sa propre texture à travers un argument buffer. RADV ne protège par une boucle que les accès marqués non uniformes : toute la wave lisait la texture d'un seul fil. Chaque accès de texture ou d'image du NIR de Stela est maintenant marqué, puis `nir_opt_non_uniform_access` retire la marque là où l'identifiant est uniforme.
+- **Un scissor par viewport.** Metal ne découpe aucun viewport tant que l'encodeur ne pose pas de scissor, alors que Vulkan exige autant de scissors que de viewports. Plusieurs viewports posés sans scissor étaient tracés avec un seul. Chacun a maintenant un scissor qui couvre la cible (`command_buffer/render.rs`).
+- **Commandes générées par le GPU sur RADV.** Sans ensemble d'exécution, `VK_EXT_device_generated_commands` demande le pipeline lié (`VkGeneratedCommandsPipelineInfoEXT`) : RADV mesure les séquences avec et plantait sans lui. Le pipeline est maintenant transmis. RADV prétraite aussi dans ses types de mémoire à adresses 32 bits, et Stela refusait tant que tous les types de mémoire d'upload ne convenaient pas : un seul type convenable suffit, puisque les blocs d'upload sont des buffers d'usage « preprocess », que le pilote garde dans ces types.
 
 Les 13 écarts :
 
@@ -107,10 +114,12 @@ Les 13 écarts :
 | Filtrage anisotrope | 5 | Sa qualité est propre à chaque matériel : Metal ne la fixe pas. |
 | PVRTC en stockage partagé | 6 | Le Mac charge et lit ces textures par le CPU. L'exécuteur passe par un blit, faute de mémoire d'invité sous Linux. C'est une limite de l'exécuteur, à revoir avec macOS invité. |
 | Cibles `rgb10a2unorm` et `bgr10a2unorm` | 2 | Une unité de moins sur certains pixels. Pour ces formats, RADV fait sortir la couleur en flottant 16 bits (`ac_choose_spi_color_formats`), ce que son code présente comme requis avec RB+. |
+| Tracés encodés par le GPU qui changent de pipeline ou de pas de sommets | 2 | `sequence.icb.gpu_indexed_draw` et `sequence.icb.gpu_draw_dynamic_stride` ne tracent rien. Les mêmes tracés encodés par le CPU, et les tracés GPU qui héritent du pipeline, passent. Le défaut est dans les commandes générées de rendu de RADV, avec un ensemble d'exécution ou un pas de sommets dynamique : à examiner. |
 
 Les bibliothèques `*_runtime_*`, que le Mac compile à partir du MSL pendant le cas, sont compilées à l'avance sur le Mac par `xtask/scripts/amd-runtime-libraries.py`, avec les options de ligne de commande équivalentes (langage, fast math, mode mathématique, macros…), puis chargées depuis `plan/lib-runtime`. Les 7 bibliothèques dont une option n'a pas d'équivalent en ligne de commande restent de côté.
 
 ## Ce qui reste pour J4
 
-- Étendre l'exécuteur aux familles qui restent sous Linux : indirect command buffers (45 cas), tessellation (32), argument buffers (24), tables de fonctions (21), tuiles (19), vues de textures (15), mesh (14), et quelques familles plus petites (164 cas en tout).
+- Étendre l'exécuteur aux familles qui restent sous Linux (141 cas) : tables de fonctions visibles (29), tuiles et imageblocks (23), réflexion (10), modes de stockage (8), bibliothèques dynamiques (7), fonctions liées (7), argument encoders (8), événements et files (9), compteurs, journal, et quelques cas isolés.
+- Les deux tracés encodés par le GPU qui ne tracent rien.
 - Mesurer les alignements réels (lignes et décalages des surfaces linéaires) sur des images linéaires de RADV, pour remplacer les 256 octets estimés de `metal/amd.rs`.
