@@ -133,7 +133,8 @@ pub fn run(
     for case in cases {
         let name = case["name"].as_str().unwrap_or_default();
         let render = super::suite_render::basic(case);
-        if !(basic(case) || render)
+        let blit = super::suite_blit::basic(case);
+        if !(basic(case) || render || blit)
             || !(only.is_empty() || only.iter().any(|text| name.contains(text)))
         {
             continue;
@@ -148,7 +149,9 @@ pub fn run(
         let crashed = json!({"status": "failed", "error": "the runner crashed"});
         fs::write(out.join("status.json"), crashed.to_string()).map_err(|e| e.to_string())?;
         let begun = Instant::now();
-        let ran = if render {
+        let ran = if blit {
+            runner.blit_case(case, &out)
+        } else if render {
             runner.render_case(case, &out)
         } else {
             runner.case(case, &out)
@@ -388,13 +391,15 @@ impl Runner<'_> {
         let mut readbacks = readbacks.iter();
         for output in case["outputs"].as_array().into_iter().flatten() {
             let name = output["name"].as_str().unwrap_or_default();
-            let bytes = if held.textures.iter().any(|(t, _)| t == name) {
+            let texture = held.textures.iter().any(|(t, _)| t == name);
+            let bytes = if texture {
                 let at = *readbacks.next().expect("one readback per texture output");
                 let buffer = &held.buffers[at];
-                buffer.bytes(buffer.length)
+                buffer.bytes(buffer.length).to_vec()
             } else if let Some(&at) = held.named.get(name) {
                 let buffer = &held.buffers[at];
-                buffer.bytes(output["length"].as_u64().unwrap_or(buffer.length))
+                let length = output["length"].as_u64().unwrap_or(buffer.length);
+                buffer.bytes(length).to_vec()
             } else {
                 return Err(Error::Invalid(
                     "an output is neither a buffer nor a texture",

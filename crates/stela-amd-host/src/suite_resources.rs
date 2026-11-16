@@ -261,12 +261,20 @@ impl Runner<'_> {
         texture: &'t Texture,
         region: &Subresource,
     ) -> Result<BlitTexture<'t>> {
+        self.blit_at(texture, region.level, region.slice)
+    }
+
+    /// `texture` for a blit of its `level` of `slice`.
+    pub(crate) fn blit_at<'t>(
+        &mut self,
+        texture: &'t Texture,
+        level: u64,
+        slice: u64,
+    ) -> Result<BlitTexture<'t>> {
         Ok(BlitTexture {
             image: self.device.texture_image(texture.id)?,
             descriptor: &texture.descriptor,
-            storage: self
-                .device
-                .texel_storage(texture.id, region.level, region.slice)?,
+            storage: self.device.texel_storage(texture.id, level, slice)?,
             blocks: self.device.texture_blocks(texture.id)?,
         })
     }
