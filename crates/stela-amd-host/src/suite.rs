@@ -27,14 +27,14 @@ use stela_driver_gpu::metal::{
     command_buffer::{CommandBuffer, ComputePipelineState},
     device::{
         BufferId, LibraryId, SamplerId, TextureId,
-        pipelines::{ComputePipelineRequest, LinkedFunctions, PipelineArchives},
+        pipelines::{ComputePipelineRequest, PipelineArchives},
     },
     error::{Error, Result},
     vertex::{Attribute, STRIDE_DYNAMIC, StageInLayout, StageInStep, StageInputDescriptor, VertexFormat},
     vulkan::object::Semaphore,
 };
 
-const BASIC_CASE: [&str; 26] = [
+const BASIC_CASE: [&str; 37] = [
     "buffers",
     "constants",
     "stage_input",
@@ -61,10 +61,22 @@ const BASIC_CASE: [&str; 26] = [
     "execute_icb",
     "supports_icb",
     "use",
+    "visible_functions",
+    "binary_functions",
+    "private_functions",
+    "function_tables",
+    "call_stack_depth",
+    "handles_by_name",
+    "function_groups",
+    "group_multiple_of_width",
+    "uses",
+    "pipeline_creation",
+    "creation",
 ];
 /// `storage` and `write_combined` change where the CPU reaches a buffer,
 /// not what it holds.
-const BASIC_BUFFER: [&str; 14] = [
+const BASIC_BUFFER: [&str; 15] = [
+    "stage",
     "untracked",
     "alias_of",
     "heap",
@@ -120,8 +132,7 @@ fn basic(case: &Value) -> bool {
         && super::suite_arguments::supported(case)
         && super::suite_icb::supported(case)
         && super::suite_icb::execution_supported(&case["execute_icb"])
-        && super::suite_icb::supported(case)
-        && super::suite_icb::execution_supported(&case["execute_icb"])
+        && super::suite_tables::supported(case, "")
         && all("buffers", &BASIC_BUFFER)
         && all("outputs", &BASIC_OUTPUT)
         && all("textures", &super::suite_resources::TEXTURE)
@@ -223,6 +234,7 @@ pub fn run(
         plan_dir,
         libraries: BTreeMap::new(),
         pipelines: BTreeMap::new(),
+        tables: Vec::new(),
         next_import: 1 << 8,
     };
     let (mut ok, mut failed, mut skipped) = (0, 0, 0);
@@ -286,7 +298,10 @@ pub(crate) struct Runner<'a> {
     libraries: BTreeMap<String, LibraryId>,
     /// By library, function, threadgroup size, and the constants and stage
     /// input the case gives, as JSON.
-    pipelines: BTreeMap<(String, String, [u64; 3], String), ComputePipelineState>,
+    pipelines: BTreeMap<(String, String, [u64; 3], String), Pipeline>,
+    /// The visible function tables the cases made, freed with their
+    /// resources.
+    pub(crate) tables: Vec<BufferId>,
     /// The next fake guest range index each import takes.
     pub(crate) next_import: u64,
 }
@@ -305,6 +320,14 @@ pub(crate) fn named<T: Copy + core::fmt::Debug>(all: &[T], name: &str) -> Option
     all.iter()
         .copied()
         .find(|value| plain(&format!("{value:?}")) == name)
+}
+
+/// A compute pipeline the runner made, with the functions it links.
+#[derive(Clone)]
+struct Pipeline {
+    state: ComputePipelineState,
+    id: stela_driver_gpu::metal::device::ComputePipelineId,
+    linked: super::suite_tables::Linked,
 }
 
 /// A shared buffer a case uses, and its mapping.
@@ -573,6 +596,9 @@ impl Runner<'_> {
 
     /// Frees what a case made, and retires the imports so their pages unmap.
     pub(crate) fn release(&mut self, held: Held) {
+        for table in core::mem::take(&mut self.tables) {
+            let _ = self.device.destroy_buffer(table);
+        }
         for (_, icb) in &held.icbs {
             let _ = self.device.destroy_indirect_command_buffer(*icb);
         }
@@ -722,7 +748,11 @@ impl Runner<'_> {
         };
         let grid = triple("grid", 1);
         let group = triple("threadgroup", 64);
-        let state = self.pipeline(library, function, group, step)?;
+        let Pipeline {
+            state,
+            id: pipeline,
+            linked,
+        } = self.pipeline(library, function, group, step)?;
         if !continues {
             let dispatch = if step["concurrent"] == true {
                 DispatchType::Concurrent
@@ -735,6 +765,7 @@ impl Runner<'_> {
         }
         commands.set_compute_pipeline_state(&state)?;
         self.bind_resources(step, held, commands, true)?;
+        self.bind_compute_tables(step, pipeline, &linked, commands)?;
         if step["execute_icb"].is_object() {
             return self.execute_icb(&step["execute_icb"], held, commands);
         }
@@ -779,16 +810,23 @@ impl Runner<'_> {
         function: &str,
         group: [u64; 3],
         case: &Value,
-    ) -> Result<ComputePipelineState> {
+    ) -> Result<Pipeline> {
         let shape = format!(
-            "{} {} {}",
-            case["constants"], case["stage_input"], case["supports_icb"]
+            "{} {} {} {} {} {} {}",
+            case["constants"],
+            case["stage_input"],
+            case["supports_icb"],
+            case["visible_functions"],
+            case["binary_functions"],
+            case["private_functions"],
+            case["call_stack_depth"],
         );
         let key = (library.to_owned(), function.to_owned(), group, shape);
-        if let Some(state) = self.pipelines.get(&key) {
-            return Ok(state.clone());
+        if let Some(pipeline) = self.pipelines.get(&key) {
+            return Ok(pipeline.clone());
         }
         let library = self.library(library)?;
+        let (linked_functions, linked) = self.linked_functions(library, case, "")?;
         let constants = super::suite_constants::values(&case["constants"])?;
         let function = self
             .device
@@ -803,12 +841,17 @@ impl Runner<'_> {
             threadgroup_size_is_multiple_of_thread_execution_width: false,
             max_total_threads_per_threadgroup: 0,
             stage_input,
-            linked_functions: LinkedFunctions::default(),
+            linked_functions,
             support_indirect_command_buffers: case["supports_icb"] == true,
             archives: PipelineArchives::default(),
         })?;
         let state = self.device.compute_pipeline_state(pipeline)?.clone();
-        self.pipelines.insert(key, state.clone());
-        Ok(state)
+        let made = Pipeline {
+            state,
+            id: pipeline,
+            linked,
+        };
+        self.pipelines.insert(key, made.clone());
+        Ok(made)
     }
 }

@@ -32,7 +32,9 @@ use stela_driver_gpu::metal::{
     vertex::{Attribute, Layout, STRIDE_DYNAMIC, StepFunction, VertexDescriptor, VertexFormat},
 };
 
-const CASE: [&str; 20] = [
+const CASE: [&str; 22] = [
+    "uses",
+    "pipeline_creation",
     "icbs",
     "use",
     "arguments",
@@ -54,7 +56,21 @@ const CASE: [&str; 20] = [
     "textures",
     "vertex",
 ];
-const RENDER: [&str; 36] = [
+const RENDER: [&str; 50] = [
+    "vertex_function_groups",
+    "fragment_function_groups",
+    "vertex_visible_functions",
+    "fragment_visible_functions",
+    "vertex_private_functions",
+    "fragment_private_functions",
+    "vertex_binary_functions",
+    "fragment_binary_functions",
+    "vertex_tables",
+    "fragment_tables",
+    "vertex_call_stack_depth",
+    "fragment_call_stack_depth",
+    "handles_by_name",
+    "call_stack_depth",
     "execute_icb",
     "supports_icb",
     "input_primitive",
@@ -178,6 +194,8 @@ pub fn basic(case: &Value) -> bool {
     case["kind"] == "render"
         && only(case, &CASE)
         && only(render, &RENDER)
+        && super::suite_tables::supported(render, "vertex_")
+        && super::suite_tables::supported(render, "fragment_")
         && all(&case["heaps"], &super::suite_heaps::HEAP)
         && super::suite_arguments::supported(case)
         && super::suite_icb::supported(case)
@@ -552,6 +570,10 @@ impl Runner<'_> {
         } else {
             None
         };
+        // The functions each stage's tables call.
+        let (vertex_links, vertex_linked) = self.linked_functions(library, render, "vertex_")?;
+        let (fragment_links, fragment_linked) =
+            self.linked_functions(library, render, "fragment_")?;
         let pipeline = match vertex {
             Some(vertex) => self.device.new_render_pipeline(&RenderPipelineRequest {
                 vertex_function: vertex,
@@ -569,8 +591,8 @@ impl Runner<'_> {
                 } else {
                     Default::default()
                 },
-                vertex_linked_functions: LinkedFunctions::default(),
-                fragment_linked_functions: LinkedFunctions::default(),
+                vertex_linked_functions: vertex_links,
+                fragment_linked_functions: fragment_links,
                 support_indirect_command_buffers: render["supports_icb"] == true,
                 archives: PipelineArchives::default(),
             })?,
@@ -672,6 +694,7 @@ impl Runner<'_> {
         // The encoder's state, the bindings, the draws.
         self.device.begin_render(commands, &pass)?;
         commands.set_render_pipeline_state(&state)?;
+        self.bind_render_tables(render, pipeline, [&vertex_linked, &fragment_linked], commands)?;
         commands.set_depth_stencil_state(Some(&depth_stencil(&depth_stencil_descriptor)))?;
         if let Some((front, back)) = references {
             commands.set_stencil_reference_values(front, back)?;

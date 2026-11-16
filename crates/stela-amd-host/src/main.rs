@@ -50,6 +50,8 @@ mod suite_icb;
 mod suite_render;
 #[cfg(feature = "radv-host")]
 mod suite_resources;
+#[cfg(feature = "radv-host")]
+mod suite_tables;
 mod sysfs;
 
 fn log(message: &str) {
