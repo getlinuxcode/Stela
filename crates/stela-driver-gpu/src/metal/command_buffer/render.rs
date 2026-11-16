@@ -261,6 +261,10 @@ pub(super) struct RenderState {
     pub(super) tests: super::fragment_tests::TestState,
     /// The first viewport's near and far depths.
     pub(super) depth_range: [f32; 2],
+    /// Whether the encoder set scissor rectangles: until it does, each
+    /// viewport has one covering the target, as Vulkan's matching viewport
+    /// and scissor counts need.
+    scissors_set: bool,
     /// The front and back faces' stencil reference values.
     pub(super) stencil_references: [u32; 2],
     /// The decodes of IOSurface planes before the pass, as (command index,
@@ -483,6 +487,7 @@ impl CommandBuffer {
             tile: super::tile::TileState::default(),
             tests: super::fragment_tests::TestState::default(),
             depth_range: [0.0, 1.0],
+            scissors_set: false,
             stencil_references: [0, 0],
             plane_decodes,
         };
@@ -1541,11 +1546,22 @@ impl CommandBuffer {
         self.recorder.push(Command::SetViewports(
             viewports.iter().copied().map(flip).collect(),
         ));
+        if !render.scissors_set {
+            let [width, height] = render.pass.extent;
+            let whole = Rect {
+                offset: [0, 0],
+                extent: [width, height],
+            };
+            self.recorder
+                .push(Command::SetScissors(alloc::vec![whole; viewports.len()]));
+        }
         Ok(())
     }
 
     pub fn set_scissor_rects(&mut self, rects: &[ScissorRect]) -> Result<()> {
-        let [width, height] = render(&mut self.encoder)?.pass.extent;
+        let render = render(&mut self.encoder)?;
+        render.scissors_set = true;
+        let [width, height] = render.pass.extent;
         ensure(
             (1..=16).contains(&rects.len()),
             "between 1 and 16 scissor rectangles",

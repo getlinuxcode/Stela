@@ -11,22 +11,23 @@ use stela_driver_gpu::metal::{
         BlendFactor, BlendOperation, ColorWriteMask, CompareFunction, CullMode, IndexType,
         LoadAction, MultisampleDepthResolveFilter, MultisampleStencilResolveFilter,
         PrimitiveTopologyClass, PrimitiveType, StencilOperation, StoreAction, StoreActionOptions,
-        DepthClipMode, TextureType, TriangleFillMode, VisibilityResultMode, VisibilityResultType,
+        DepthClipMode, TessellationControlPointIndexType, TessellationFactorFormat,
+        TessellationFactorStepFunction, TessellationPartitionMode, TextureType, TriangleFillMode, VisibilityResultMode, VisibilityResultType,
         Winding,
     },
     command_buffer::{
         CommandBuffer,
-        render::{ScissorRect, Viewport},
+        render::{PatchSource, ScissorRect, Viewport},
     },
     device::{
         TextureId,
-        pipelines::{LinkedFunctions, PipelineArchives, RenderPipelineRequest},
+        pipelines::{LinkedFunctions, MeshPipelineRequest, PipelineArchives, RenderPipelineRequest},
         queue::{AttachmentRequest, RenderPassRequest},
     },
     error::{Error, Result},
     pipeline::{
         ColorAttachmentDescriptor, DepthStencilDescriptor, MAX_COLOR_ATTACHMENTS, RenderTargets,
-        StencilDescriptor, depth_stencil,
+        StageThreads, StencilDescriptor, TessellationDescriptor, depth_stencil,
     },
     vertex::{Attribute, Layout, StepFunction, VertexDescriptor, VertexFormat},
 };
@@ -48,7 +49,10 @@ const CASE: [&str; 15] = [
     "textures",
     "vertex",
 ];
-const RENDER: [&str; 31] = [
+const RENDER: [&str; 34] = [
+    "input_primitive",
+    "mesh",
+    "tessellation",
     "alpha_to_coverage",
     "alpha_to_one",
     "depth_clip",
@@ -163,6 +167,8 @@ pub fn basic(case: &Value) -> bool {
     case["kind"] == "render"
         && only(case, &CASE)
         && only(render, &RENDER)
+        && (render["tessellation"].is_null() || only(&render["tessellation"], &TESSELLATION))
+        && (render["mesh"].is_null() || only(&render["mesh"], &MESH))
         && all(&render["colors"], &COLOR)
         && (render["depth"].is_null() || only(&render["depth"], &DEPTH))
         && (render["stencil"].is_null() || only(&render["stencil"], &STENCIL))
@@ -191,6 +197,69 @@ pub fn basic(case: &Value) -> bool {
 /// Whether every output is one this runner writes.
 pub fn all_outputs(outputs: &Value) -> bool {
     all(outputs, &BASIC_OUTPUT)
+}
+
+const TESSELLATION: [&str; 13] = [
+    "control_point_index",
+    "control_point_index_type",
+    "control_points",
+    "factor_scale",
+    "factor_step",
+    "factors",
+    "indirect",
+    "instance_count",
+    "instance_stride",
+    "max_factor",
+    "partition",
+    "patch_count",
+    "patch_index",
+];
+const MESH: [&str; 11] = [
+    "group_multiple_of_width",
+    "indirect",
+    "max_threadgroups",
+    "mesh",
+    "mesh_threads",
+    "object",
+    "object_threadgroup_memory",
+    "object_threads",
+    "payload_length",
+    "threadgroups",
+    "threads",
+];
+
+/// The pipeline's tessellation, as the runner's: half factors, integer
+/// partitions unless named, per-instance factors when the draw has a stride.
+fn tessellation(tess: &Value) -> Result<TessellationDescriptor> {
+    let step = tess["factor_step"].as_str().unwrap_or(if tess["instance_stride"].is_null() {
+        "per_patch"
+    } else {
+        "per_patch_and_per_instance"
+    });
+    Ok(TessellationDescriptor {
+        partition_mode: named(
+            TessellationPartitionMode::ALL,
+            tess["partition"].as_str().unwrap_or("integer"),
+        )
+        .ok_or(Error::Unsupported("a partition mode"))?,
+        max_tessellation_factor: tess["max_factor"].as_u64().unwrap_or(16),
+        factor_scale_enabled: !tess["factor_scale"].is_null(),
+        factor_format: TessellationFactorFormat::Half,
+        control_point_index_type: if tess["control_point_index"].is_null() {
+            TessellationControlPointIndexType::None
+        } else if tess["control_point_index_type"] == "uint16" {
+            TessellationControlPointIndexType::UInt16
+        } else {
+            TessellationControlPointIndexType::UInt32
+        },
+        factor_step_function: named(TessellationFactorStepFunction::ALL, step)
+            .ok_or(Error::Unsupported("a factor step function"))?,
+        output_winding_order: if tess["winding"] == "cw" {
+            Winding::Clockwise
+        } else {
+            Winding::CounterClockwise
+        },
+    })
 }
 
 fn compare(item: &Value, default: &str) -> Result<CompareFunction> {
@@ -238,6 +307,8 @@ fn vertex_descriptor(spec: &Value) -> Result<VertexDescriptor> {
             "instance" => StepFunction::PerInstance,
             "constant" => StepFunction::Constant,
             "vertex" => StepFunction::PerVertex,
+            "patch" => StepFunction::PerPatch,
+            "patch_control_point" => StepFunction::PerPatchControlPoint,
             _ => return Err(Error::Unsupported("a vertex step function")),
         };
         if item["stride"].is_string() {
@@ -308,11 +379,18 @@ impl Runner<'_> {
         // The pipeline's targets and the pass's attachments.
         let library = self.library(library)?;
         let constants = super::suite_constants::values(&case["constants"])?;
-        let vertex = self.device.new_function(
-            library,
-            case["vertex"].as_str().unwrap_or_default(),
-            Some(&constants),
-        )?;
+        let mesh = &render["mesh"];
+        let tess = &render["tessellation"];
+        let mut function = |name: &Value| -> Result<_> {
+            self.device
+                .new_function(library, name.as_str().unwrap_or_default(), Some(&constants))
+        };
+        // A mesh pipeline has object and mesh functions in place of a vertex one.
+        let vertex = if mesh.is_object() {
+            None
+        } else {
+            Some(function(&case["vertex"])?)
+        };
         let fragment = match case["fragment"].as_str() {
             Some(name) => Some(self.device.new_function(library, name, Some(&constants))?),
             None => None,
@@ -456,19 +534,62 @@ impl Runner<'_> {
         } else {
             None
         };
-        let pipeline = self.device.new_render_pipeline(&RenderPipelineRequest {
-            vertex_function: vertex,
-            fragment_function: fragment,
-            vertex_descriptor,
-            targets,
-            input_primitive_topology: PrimitiveTopologyClass::Unspecified,
-            max_vertex_amplification_count: 1,
-            tessellation: Default::default(),
-            vertex_linked_functions: LinkedFunctions::default(),
-            fragment_linked_functions: LinkedFunctions::default(),
-            support_indirect_command_buffers: false,
-            archives: PipelineArchives::default(),
-        })?;
+        let pipeline = match vertex {
+            Some(vertex) => self.device.new_render_pipeline(&RenderPipelineRequest {
+                vertex_function: vertex,
+                fragment_function: fragment,
+                vertex_descriptor,
+                targets,
+                input_primitive_topology: match render["input_primitive"].as_str() {
+                    Some(class) => named(PrimitiveTopologyClass::ALL, class)
+                        .ok_or(Error::Unsupported("a primitive class"))?,
+                    None => PrimitiveTopologyClass::Unspecified,
+                },
+                max_vertex_amplification_count: 1,
+                tessellation: if tess.is_object() {
+                    tessellation(tess)?
+                } else {
+                    Default::default()
+                },
+                vertex_linked_functions: LinkedFunctions::default(),
+                fragment_linked_functions: LinkedFunctions::default(),
+                support_indirect_command_buffers: false,
+                archives: PipelineArchives::default(),
+            })?,
+            None => {
+                let library_functions = (
+                    match mesh["object"].as_str() {
+                        Some(name) => {
+                            Some(self.device.new_function(library, name, Some(&constants))?)
+                        }
+                        None => None,
+                    },
+                    self.device.new_function(
+                        library,
+                        mesh["mesh"].as_str().unwrap_or_default(),
+                        Some(&constants),
+                    )?,
+                );
+                let threads = StageThreads {
+                    max_total_threads: 0,
+                    multiple_of_width: mesh["group_multiple_of_width"] == true,
+                };
+                self.device.new_mesh_render_pipeline(&MeshPipelineRequest {
+                    object_function: library_functions.0,
+                    mesh_function: library_functions.1,
+                    fragment_function: fragment,
+                    targets,
+                    max_vertex_amplification_count: 1,
+                    object_threads: threads,
+                    mesh_threads: threads,
+                    payload_memory_length: mesh["payload_length"].as_u64().unwrap_or(0),
+                    object_linked_functions: LinkedFunctions::default(),
+                    mesh_linked_functions: LinkedFunctions::default(),
+                    fragment_linked_functions: LinkedFunctions::default(),
+                    archives: PipelineArchives::default(),
+                })?
+            }
+        };
         let state = self.device.render_pipeline_state(pipeline)?.clone();
         // An array target renders layered, the vertex function choosing the
         // slice, unless the attachment names one.
@@ -618,6 +739,78 @@ impl Runner<'_> {
                 .ok_or(Error::Invalid("a draw names no buffer"))?;
             self.device.buffer(held.buffers[at].id)
         };
+        if mesh.is_object() {
+            let size = |key: &str| -> [u32; 3] {
+                core::array::from_fn(|at| mesh[key][at].as_u64().unwrap_or(1) as u32)
+            };
+            if let Some(length) = mesh["object_threadgroup_memory"].as_u64() {
+                commands.set_object_threadgroup_memory_length(length, 0)?;
+            }
+            let (object, mesh_threads) = (size("object_threads"), size("mesh_threads"));
+            let indirect = mesh["indirect"].as_str().map(buffer_named).transpose()?;
+            let mut resolver = self.device.resolver();
+            if let Some(arguments) = indirect {
+                commands.draw_mesh_threadgroups_indirect(
+                    &mut resolver,
+                    arguments,
+                    0,
+                    object,
+                    mesh_threads,
+                )?;
+            } else if mesh["threads"].is_array() {
+                commands.draw_mesh_threads(&mut resolver, size("threads"), object, mesh_threads)?;
+            } else {
+                commands.draw_mesh_threadgroups(
+                    &mut resolver,
+                    size("threadgroups"),
+                    object,
+                    mesh_threads,
+                )?;
+            }
+            drop(resolver);
+            return commands.end_encoding(&mut self.device.resolver());
+        }
+        if tess.is_object() {
+            // Factors per patch, and per instance at a stride; patches by
+            // index buffer and draws from an indirect buffer when named.
+            let factors = buffer_named(tess["factors"].as_str().unwrap_or_default())?;
+            commands.set_tessellation_factor_buffer(
+                Some(factors),
+                0,
+                tess["instance_stride"].as_u64().unwrap_or(0),
+            )?;
+            if let Some(scale) = tess["factor_scale"].as_f64() {
+                commands.set_tessellation_factor_scale(scale as f32)?;
+            }
+            let indices = |key: &str| -> Result<Option<_>> {
+                tess[key]
+                    .as_str()
+                    .map(|name| buffer_named(name).map(|buffer| (buffer, 0)))
+                    .transpose()
+            };
+            let source = PatchSource {
+                control_points: tess["control_points"].as_u64().unwrap_or(4) as u32,
+                patch_indices: indices("patch_index")?,
+                control_point_indices: indices("control_point_index")?,
+            };
+            let indirect = tess["indirect"].as_str().map(buffer_named).transpose()?;
+            let mut resolver = self.device.resolver();
+            if let Some(arguments) = indirect {
+                commands.draw_patches_indirect(&mut resolver, &source, arguments, 0)?;
+            } else {
+                let number = |key: &str, default: u64| tess[key].as_u64().unwrap_or(default) as u32;
+                commands.draw_patches(
+                    &mut resolver,
+                    &source,
+                    number("patch_start", 0),
+                    number("patch_count", 1),
+                    number("instance_count", 1),
+                    0,
+                )?;
+            }
+            drop(resolver);
+            return commands.end_encoding(&mut self.device.resolver());
+        }
         if render["indirect"].is_object() {
             let indirect = &render["indirect"];
             let arguments = buffer_named(indirect["buffer"].as_str().unwrap_or_default())?;
