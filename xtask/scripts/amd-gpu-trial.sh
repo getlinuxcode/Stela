@@ -55,7 +55,7 @@ run() {
   dmesg_from=$(dmesg | wc -l)
   "$root/xtask/scripts/vfio-gpu.sh" run --stop-desktop --seconds 900 -- \
     bash -c "cd '$root' && '$home/.cargo/bin/cargo' xtask boot run --kvm --vfio-gpu '$card' \
-      --image '$image' --display none --timeout 300 --output '$out' \
+      --image '$image' --display none --timeout 120 --output '$out' \
       --append '--system --load 0x800004000 --entry 0x800004000 --gpu-trial'"
   code=$?
   {
