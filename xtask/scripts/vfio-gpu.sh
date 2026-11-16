@@ -193,7 +193,12 @@ run() {
   # Stopping the service ends the command too: first let the card write no
   # more to memory QEMU is about to unmap.
   trap 'for function in "${members[@]}"; do setpci -s "$function" COMMAND=0:4; done; kill "$child" 2>/dev/null' TERM
-  timeout --kill-after=30 "$seconds" runuser -u "$owner" -- "$@" &
+  # setpriv, not runuser: runuser's PAM session (pam_limits) would lower the
+  # memory-lock limit back to the user's, below what VFIO pins for guest RAM.
+  local home
+  home=$(getent passwd "$owner" | cut -d: -f6)
+  timeout --kill-after=30 "$seconds" env HOME="$home" USER="$owner" LOGNAME="$owner" \
+    setpriv --reuid="$owner" --regid="$(id -g "$owner")" --init-groups -- "$@" &
   child=$!
   wait "$child" || code=$?
   wait "$child" 2>/dev/null || true
