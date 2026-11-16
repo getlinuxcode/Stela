@@ -622,6 +622,18 @@ pub fn depth_stencil_copies(device: &PhysicalDevice) -> bool {
 
 /// Whether a fragment function on `device` can run the fragment tests
 /// itself: on storage copies of the attachments in its interlock section.
+/// `threadExecutionWidth`: Apple GPUs run 32-wide SIMD groups, which Metal
+/// code written for them assumes (simdgroup shuffles, rotations and
+/// barriers), so a driver that compiles at several widths (RADV: 32 to 64)
+/// runs 32; otherwise its widest.
+pub fn simd_width(min_subgroup_size: u32, max_subgroup_size: u32) -> u64 {
+    if (min_subgroup_size..=max_subgroup_size).contains(&32) {
+        32
+    } else {
+        u64::from(max_subgroup_size)
+    }
+}
+
 pub fn fragment_tests(device: &PhysicalDevice) -> bool {
     device.features.fragment_shader_pixel_interlock && depth_stencil_copies(device)
 }
@@ -906,7 +918,7 @@ impl Derivation<'_> {
                 depth: u64::from(workgroup[2]),
             },
             max_total_threads_per_threadgroup: u64::from(limits.max_compute_work_group_invocations),
-            thread_execution_width: u64::from(limits.max_subgroup_size),
+            thread_execution_width: simd_width(limits.min_subgroup_size, limits.max_subgroup_size),
             max_threadgroup_memory_length: u64::from(limits.max_compute_shared_memory_size),
             max_buffer_length: limits
                 .max_buffer_size

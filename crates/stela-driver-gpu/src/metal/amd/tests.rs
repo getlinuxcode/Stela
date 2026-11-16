@@ -133,3 +133,16 @@ fn an_nvk_like_snapshot_on_navi48_reaches_metal3_and_apple7() {
         assert!(capabilities.supports_family(family), "{family:?}");
     }
 }
+
+#[test]
+fn radv_runs_apples_simd_width() {
+    use crate::metal::capabilities::simd_width;
+    // RADV compiles compute at 32 or 64 lanes and defaults to 64: Metal code
+    // for Apple GPUs takes 32-wide SIMD groups.
+    assert_eq!(simd_width(32, 64), 32);
+    // NVK and ANV.
+    assert_eq!(simd_width(32, 32), 32);
+    assert_eq!(simd_width(8, 32), 32);
+    // A driver that cannot run 32 keeps its widest.
+    assert_eq!(simd_width(64, 64), 64);
+}
