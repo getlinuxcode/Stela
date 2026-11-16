@@ -15,7 +15,12 @@
 #   sudo systemd-run --unit=stela-amd-gpu --collect \
 #     --setenv=STELA_VFIO_USER=$USER "$PWD/xtask/scripts/amd-gpu-trial.sh" run
 #
-# The desktop comes back after it; read .stela/vm/gpu-trial/report.txt.
+# The desktop comes back after it, logged in again without a password
+# (vfio-gpu.sh --autologin); read .stela/vm/gpu-trial/report.txt. An agent
+# in tmux (xtask/scripts/amd-agent.sh) keeps working through the trial and
+# can follow its serial log as it is written:
+#
+#   xtask/scripts/amd-gpu-trial.sh live
 set -uo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -53,7 +58,7 @@ run() {
   } >"$report"
   start=$(date +%s)
   dmesg_from=$(dmesg | wc -l)
-  "$root/xtask/scripts/vfio-gpu.sh" run --stop-desktop --seconds 900 -- \
+  "$root/xtask/scripts/vfio-gpu.sh" run --stop-desktop --autologin --seconds 900 -- \
     bash -c "cd '$root' && '$home/.cargo/bin/cargo' xtask boot run --kvm --vfio-gpu '$card' \
       --image '$image' --display none --timeout 120 --output '$out' \
       --append '--system --load 0x800004000 --entry 0x800004000 --gpu-trial'"
@@ -71,8 +76,23 @@ run() {
   chown -R "$user:" "$(dirname "$out")"
 }
 
+# The trial's serial log as QEMU writes it, until the run's report is in.
+live() {
+  # The next run's log, not one an earlier run left.
+  local since
+  since=$(date +%s)
+  until [[ -f $out/serial.txt ]] && (($(stat -c %W "$out" 2>/dev/null || echo 0) >= since ||
+    $(stat -c %Y "$out/serial.txt") >= since)) && [[ ! -f $out/report.txt ]]; do sleep 1; done
+  tail -n +1 -f "$out/serial.txt" &
+  local tail=$!
+  until [[ -f $out/report.txt ]]; do sleep 2; done
+  kill "$tail"
+  cat "$out/report.txt"
+}
+
 case ${1:-} in
   build) build ;;
   run) run ;;
-  *) echo "usage: $0 build|run" >&2; exit 2 ;;
+  live) live ;;
+  *) echo "usage: $0 build|run|live" >&2; exit 2 ;;
 esac

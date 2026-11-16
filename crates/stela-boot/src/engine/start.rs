@@ -1453,11 +1453,17 @@ fn open_gpus(
         .map(|region| region.physical..region.physical + region.bytes)
         .collect();
     let Some(window) = mmio.and_then(|mmio| mmio.window()) else {
+        // AMD fork: in the serial log too, which a GPU trial reads.
+        output::arguments(format_args!(
+            "GPU not started: no page window (native MMIO {})\n",
+            if mmio.is_some() { "present" } else { "absent" }
+        ));
         crate::status::warn("this PC cannot map a GPU's memory, so it is left unused");
         return false;
     };
     let Some(mmio) = mmio else { return false };
     if let Err(error) = work.service_clock().and_then(|clock| clock.epoch()) {
+        output::arguments(format_args!("GPU not started: no service clock: {error}\n"));
         crate::status::warn(&stela_boot_core::work_status::gpu_without_clock(
             crate::cpu::INVARIANT_TSC.present(),
             &format!("{error}"),

@@ -4,7 +4,7 @@
 # vfio-pci for the command's life and returned to its driver afterwards.
 #
 #   vfio-gpu.sh status
-#   sudo vfio-gpu.sh run [--stop-desktop] [--seconds N] -- COMMAND...
+#   sudo vfio-gpu.sh run [--stop-desktop [--autologin]] [--seconds N] -- COMMAND...
 #
 # COMMAND runs as the sudo caller, with memory locking unlimited so VFIO can
 # pin guest RAM. --stop-desktop stops the display manager first and restarts
@@ -14,6 +14,11 @@
 #
 #   sudo systemd-run --unit=stela-vfio --collect xtask/scripts/vfio-gpu.sh \
 #     run --stop-desktop --seconds 1800 -- COMMAND...
+#
+# --autologin (AMD fork): the restarted desktop logs the caller back in
+# without a password, once. A LightDM drop-in names them for that one start
+# and is removed as soon as LightDM has read it, so the session (and a tmux
+# session or agent in it) comes back as it would after a reboot.
 #
 # STELA_VFIO_GPU names the card, by default the first NVIDIA display function,
 # else the first RDNA 4 Radeon (Navi 48 0x7550, Navi 44 0x7590; an APU's own
@@ -146,15 +151,28 @@ restore() {
   for console in /sys/class/vtconsole/vtcon*; do
     echo 1 >"$console/bind" 2>/dev/null
   done
-  ((stopped)) && systemctl start display-manager.service
+  if ((stopped)); then
+    if ((autologin)); then
+      printf '[Seat:*]\nautologin-user=%s\nautologin-user-timeout=0\n' "$owner" >"$autologin_conf"
+    fi
+    systemctl start display-manager.service
+    if ((autologin)); then
+      # LightDM reads its configuration as it starts; later starts ask again.
+      sleep 15
+      rm -f "$autologin_conf"
+    fi
+  fi
   set -e
 }
 
 run() {
   local stop_desktop=0 seconds=3600
+  autologin=0
+  autologin_conf=/etc/lightdm/lightdm.conf.d/99-stela-vfio-autologin.conf
   while (($#)); do
     case $1 in
       --stop-desktop) stop_desktop=1 ;;
+      --autologin) autologin=1 ;;
       --seconds) seconds=$2; shift ;;
       --) shift; break ;;
       *) die "unknown option $1" ;;
@@ -163,7 +181,7 @@ run() {
   done
   (($#)) || die "no command"
   ((EUID == 0)) || die "run needs root"
-  local owner=${SUDO_USER:-${STELA_VFIO_USER:-}}
+  owner=${SUDO_USER:-${STELA_VFIO_USER:-}}
   [[ -n $owner && $owner != root ]] || die "set STELA_VFIO_USER to the user who runs the command"
 
   local card
