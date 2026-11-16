@@ -64,7 +64,7 @@ Fait sous Linux (Ubuntu 24.04, noyau 6.14, Mesa 25.2.8) :
 
 - J3 : les compilateurs de Stela sont construits avec la cible AMD et le frontal AIR (LLVM 23). La suite Metal tourne sur un Mac (M3 Pro, macOS 27.2.1) : 14 146 cas réussis, aucun échec. Les shaders de WindowServer, de CoreAnimation et de l'assistant de configuration compilent tous vers NIR pour gfx1201. Sur tout macOS, aucun refus n'est propre à AMD (`docs/amd/shaders.md`).
 
-- J4 : le vrai périphérique Metal de Stela tourne sur la 9070 XT, sous Linux, sur un RADV construit à partir du Mesa de Stela avec le compilateur Metal (`libstela_radv.so`). Le premier calcul et le premier rendu sont vérifiés, et 11 843 cas de la suite Metal (tous les calculs exécutables et 115 rendus) passent à l'identique du Mac (`docs/amd/device.md`). Les corrections d'outillage de J3 sont proposées à upstream ([tylertms/Stela#160](https://github.com/tylertms/Stela/pull/160)).
+- J4 : le vrai périphérique Metal de Stela tourne sur la 9070 XT, sous Linux, sur un RADV construit à partir du Mesa de Stela avec le compilateur Metal (`libstela_radv.so`). Le premier calcul et le premier rendu sont vérifiés, et 12 848 cas de la suite Metal passent à l'identique du Mac : calculs, rendus, blits et séquences (`docs/amd/device.md`). Les corrections d'outillage de J3 sont proposées à upstream ([tylertms/Stela#160](https://github.com/tylertms/Stela/pull/160)).
 
 À faire ensuite, dans cet ordre :
 
@@ -127,8 +127,8 @@ Détails et commandes dans `docs/amd/device.md`.
 - [x] Premier calcul : 65 536 additions de flottants sur le GPU, résultat vérifié.
 - [x] Premier rendu : un triangle dans une texture RGBA8, vérifié par son aire et la couleur de ses coins. Une bande de lignes, dessinée par le même pipeline sans classe de topologie, vérifie la PR #158 sur le matériel.
 - [x] Faire tourner la suite `metal-suite` directement contre le périphérique, sans macOS invité (`stela-amd-host --suite`) : 11 727 cas de calcul sur 11 727 identiques au Mac, aucun écart. Corrections en route : `sin` et `cos` dans RADV (patch `9001`), et largeur SIMD de 32 comme sur Apple (`capabilities::simd_width`).
-- [x] Premiers cas de rendu de la suite : 115 identiques au Mac, et 2 écarts d'une unité sur les cibles 10 bits (sortie en flottant 16 bits imposée par RB+). Correction en route : le frontal AIR construit la position du fragment dans la forme du pilote (`nir_build_frag_coord`).
-- [ ] Étendre l'exécuteur au reste du rendu (profondeur, stencil, sommets, multi-échantillonnage, échantillonneurs), puis aux textures, séquences, blits et API (1 602 cas), et aux bibliothèques compilées à l'exécution (711 cas).
+- [x] Rendu, blits et séquences dans l'exécuteur : 12 848 cas identiques au Mac. Il reste 13 écarts expliqués : filtrage anisotrope, PVRTC lu par le CPU, et cibles 10 bits avec une sortie en flottant 16 bits imposée par RB+. Corrections en route : patch RADV `9001` (coordonnée de point, `base_vertex`, lectures bornées), `nir_build_frag_coord` dans le frontal AIR.
+- [ ] Étendre l'exécuteur aux familles qui restent sous Linux : indirect command buffers, tessellation, argument buffers, tables de fonctions, tuiles, vues de textures, mesh… (400 cas), et compiler sur le Mac les bibliothèques `*_runtime_*` (737 cas). Les familles `host` et `framework` (125 cas) demandent macOS et passent en J7.
 - [ ] Mesurer les vrais alignements des surfaces linéaires sur RADV.
 
 **Terminé quand** la suite Metal passe sur la 9070 XT avec la même tolérance que sur NVIDIA.
