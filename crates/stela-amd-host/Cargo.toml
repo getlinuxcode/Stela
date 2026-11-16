@@ -17,12 +17,13 @@ path = "src/main.rs"
 # `--device`: links libstela_radv.so (RADV with the AIR compiler, built with
 # Meson's radv-host option) from STELA_RADV_DIR, by default
 # target/gpu/radv-host/amd/radv_host.
-radv-host = ["stela-driver-gpu/metal-linked", "dep:stela-contracts", "dep:libc"]
+radv-host = ["stela-driver-gpu/metal-linked", "dep:stela-contracts", "dep:libc", "dep:serde_json"]
 
 [dependencies]
 stela-driver-gpu = { path = "../stela-driver-gpu", features = ["metal-vulkan"] }
 stela-contracts = { path = "../stela-contracts", default-features = false, optional = true }
 libc = { version = "0.2", optional = true }
+serde_json = { workspace = true, optional = true }
 # The system's Vulkan loader, which reaches RADV (`libvulkan.so.1`).
 ash = { version = "0.38", default-features = false, features = ["loaded", "std"] }
 

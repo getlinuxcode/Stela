@@ -32,6 +32,8 @@ use stela_driver_gpu::metal::{
 
 #[cfg(feature = "radv-host")]
 mod device;
+#[cfg(feature = "radv-host")]
+mod suite;
 mod sysfs;
 
 fn log(message: &str) {
@@ -75,17 +77,13 @@ fn main() -> ExitCode {
         println!("No Vulkan device. Is RADV installed (mesa-vulkan-drivers)?");
         return ExitCode::FAILURE;
     }
-    let library = match std::env::args().skip(1).collect::<Vec<_>>().as_slice() {
-        [] => None,
-        [flag, path] if flag == "--device" => match std::fs::read(path) {
-            Ok(bytes) => Some(bytes),
-            Err(error) => {
-                eprintln!("cannot read {path}: {error}");
-                return ExitCode::FAILURE;
-            }
-        },
-        _ => {
-            eprintln!("usage: stela-amd-host [--device LIBRARY.metallib]");
+    let work = match parse(std::env::args().skip(1).collect()) {
+        Ok(work) => work,
+        Err(error) => {
+            eprintln!("{error}");
+            eprintln!(
+                "usage: stela-amd-host [--device LIBRARY.metallib | --suite DIR [--only TEXT]...]"
+            );
             return ExitCode::FAILURE;
         }
     };
@@ -98,9 +96,9 @@ fn main() -> ExitCode {
     }
     if let Some(gpu) = qualified {
         println!("RESULT: an AMD GPU qualifies for Stela's Metal device over RADV.");
-        match library {
+        match work {
             None => ExitCode::SUCCESS,
-            Some(library) => run_device(&gpu, library),
+            Some(work) => run_device(&gpu, work),
         }
     } else {
         println!("RESULT: no AMD GPU qualifies yet; the lines above say why.");
@@ -108,12 +106,44 @@ fn main() -> ExitCode {
     }
 }
 
-/// Runs `--device` on the qualified GPU.
+/// What the arguments ask of the Metal device: `None` to qualify only.
+fn parse(args: Vec<String>) -> Result<Option<Work>, String> {
+    match args.split_first() {
+        None => Ok(None),
+        Some((flag, [path])) if flag == "--device" => std::fs::read(path)
+            .map(|bytes| Some(Work::First(bytes)))
+            .map_err(|error| format!("cannot read {path}: {error}")),
+        Some((flag, [dir, rest @ ..])) if flag == "--suite" => {
+            let mut only = Vec::new();
+            let mut rest = rest.iter();
+            while let Some(arg) = rest.next() {
+                match (arg.as_str(), rest.next()) {
+                    ("--only", Some(text)) => only.push(text.clone()),
+                    _ => return Err(format!("unexpected argument {arg}")),
+                }
+            }
+            Ok(Some(Work::Suite(dir.into(), only)))
+        }
+        Some((arg, _)) => Err(format!("unexpected argument {arg}")),
+    }
+}
+
+/// The work `--device` or `--suite` names.
 #[cfg(feature = "radv-host")]
-fn run_device(gpu: &Gpu, library: Vec<u8>) -> ExitCode {
+use device::Work;
+#[cfg(not(feature = "radv-host"))]
+#[expect(dead_code, reason = "only the radv-host feature runs the work")]
+enum Work {
+    First(Vec<u8>),
+    Suite(std::path::PathBuf, Vec<String>),
+}
+
+/// Runs `--device` or `--suite` on the qualified GPU.
+#[cfg(feature = "radv-host")]
+fn run_device(gpu: &Gpu, work: Work) -> ExitCode {
     println!();
     println!("Metal device on {}:", sysfs::address(gpu.pci));
-    match device::run(gpu, library) {
+    match device::run(gpu, work) {
         Ok(()) => {
             println!("RESULT: Stela's Metal device ran its work on the GPU.");
             ExitCode::SUCCESS
@@ -127,8 +157,9 @@ fn run_device(gpu: &Gpu, library: Vec<u8>) -> ExitCode {
 }
 
 #[cfg(not(feature = "radv-host"))]
-fn run_device(_: &Gpu, _: Vec<u8>) -> ExitCode {
-    eprintln!("--device needs the radv-host feature, which links libstela_radv.so");
+fn run_device(_: &Gpu, work: Work) -> ExitCode {
+    let (Work::First(_) | Work::Suite(..)) = work;
+    eprintln!("--device and --suite need the radv-host feature, which links libstela_radv.so");
     ExitCode::FAILURE
 }
 

@@ -49,11 +49,20 @@ unsafe extern "C" {
     fn stela_radv_nir_options(physical: vk::PhysicalDevice) -> *const c_void;
 }
 
-type MetalDevice = Device<NativeBackend, AirCompiler>;
+pub(crate) type MetalDevice = Device<NativeBackend, AirCompiler>;
 
-/// Runs the device's first work: `library` is a Metal library holding the
-/// shaders of `metal/first.metal`, compiled on a Mac.
-pub fn run(gpu: &Gpu, library: Vec<u8>) -> core::result::Result<(), String> {
+/// What `--device` and `--suite` run.
+pub enum Work {
+    /// The first work: a Metal library holding the shaders of
+    /// `metal/first.metal`, compiled on a Mac.
+    First(Vec<u8>),
+    /// The Metal suite in a `metal-suite` directory, and the texts that
+    /// select its cases.
+    Suite(std::path::PathBuf, Vec<String>),
+}
+
+/// Opens the Metal device on `gpu` and runs `work` on it.
+pub fn run(gpu: &Gpu, work: Work) -> core::result::Result<(), String> {
     let exporter = Exporter::default();
     let loader = Loader {
         get_instance_proc_addr: entry,
@@ -72,11 +81,18 @@ pub fn run(gpu: &Gpu, library: Vec<u8>) -> core::result::Result<(), String> {
     let mut device = unsafe { reopen(loader, Box::new(exporter.clone()), compiler, gpu) }
         .map_err(|error| format!("opening the Metal device: {error:?}"))?;
     println!("  Metal device: open on RADV, with the AIR compiler for GFX12");
-    let library = device
-        .new_library(library)
-        .map_err(|error| format!("loading the Metal library: {error:?}"))?;
-    add(&mut device, &exporter, library).map_err(|error| format!("buffer sum: {error:?}"))?;
-    triangle(&mut device, &exporter, library).map_err(|error| format!("triangle: {error:?}"))
+    match work {
+        Work::First(library) => {
+            let library = device
+                .new_library(library)
+                .map_err(|error| format!("loading the Metal library: {error:?}"))?;
+            add(&mut device, &exporter, library)
+                .map_err(|error| format!("buffer sum: {error:?}"))?;
+            triangle(&mut device, &exporter, library)
+                .map_err(|error| format!("triangle: {error:?}"))
+        }
+        Work::Suite(dir, only) => super::suite::run(&mut device, &exporter, &dir, &only),
+    }
 }
 
 /// The ICD's entry point as a loader's: `vk_icdGetInstanceProcAddr` answers
@@ -358,7 +374,7 @@ fn draw<'a>(
 }
 
 /// Waits until the device completes `serial`.
-fn wait(device: &mut MetalDevice, serial: u64) -> Result<()> {
+pub(crate) fn wait(device: &mut MetalDevice, serial: u64) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(10);
     while device.poll()? < serial {
         if Instant::now() > deadline {
@@ -371,14 +387,14 @@ fn wait(device: &mut MetalDevice, serial: u64) -> Result<()> {
 
 /// A shared buffer of `bytes` over memory this process exports, and its
 /// mapping.
-fn shared_buffer(
+pub(crate) fn shared_buffer(
     device: &mut MetalDevice,
     exporter: &Exporter,
     index: u64,
     bytes: u64,
 ) -> Result<(BufferId, NonNull<u8>)> {
     // Each buffer is its own fake guest range, by which the export is found.
-    let address = index << 40;
+    let address = index << 32;
     let token = NonZeroU64::new(index).expect("indices start at one");
     let memory = device.import_memory(&[MemoryRange { address, bytes }], token)?;
     let options = ResourceOptions {
@@ -395,7 +411,7 @@ fn shared_buffer(
 
 /// Exports memfd pages as dma-bufs through `/dev/udmabuf`.
 #[derive(Clone, Default)]
-struct Exporter {
+pub(crate) struct Exporter {
     /// Each export's mapping, by its first range's address.
     mappings: Arc<Mutex<BTreeMap<u64, usize>>>,
 }

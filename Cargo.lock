@@ -2122,6 +2122,7 @@ version = "0.4.2"
 dependencies = [
  "ash",
  "libc",
+ "serde_json",
  "stela-contracts",
  "stela-driver-gpu",
 ]
