@@ -4,17 +4,19 @@
 //! vertex descriptor, buffers, textures and samplers per stage, the
 //! encoder's depth, stencil and rasterizer state, then one draw or several,
 //! indexed or not; each output read back with tight rows.
-use super::suite::{BASIC_OUTPUT, Held, Runner, named, unmet};
+use super::suite::{BASIC_OUTPUT, Held, Runner, named};
 use serde_json::{Map, Value};
-use std::{path::Path, time::Instant};
 use stela_driver_gpu::metal::{
     abi::{
         BlendFactor, BlendOperation, ColorWriteMask, CompareFunction, CullMode, IndexType,
         LoadAction, MultisampleDepthResolveFilter, MultisampleStencilResolveFilter,
         PrimitiveTopologyClass, PrimitiveType, StencilOperation, StoreAction, StoreActionOptions,
-        VisibilityResultType, Winding,
+        TextureType, VisibilityResultType, Winding,
     },
-    command_buffer::render::{ScissorRect, Viewport},
+    command_buffer::{
+        CommandBuffer,
+        render::{ScissorRect, Viewport},
+    },
     device::{
         TextureId,
         pipelines::{LinkedFunctions, PipelineArchives, RenderPipelineRequest},
@@ -164,6 +166,11 @@ pub fn basic(case: &Value) -> bool {
         && all(&case["outputs"], &BASIC_OUTPUT)
 }
 
+/// Whether every output is one this runner writes.
+pub fn all_outputs(outputs: &Value) -> bool {
+    all(outputs, &BASIC_OUTPUT)
+}
+
 fn stage(item: &Value) -> Stage {
     match item["stage"].as_str() {
         Some("vertex") => Stage::Vertex,
@@ -262,17 +269,6 @@ fn attachment<Clear>(
 }
 
 impl Runner<'_> {
-    /// Runs one render case; the GPU's milliseconds.
-    pub(crate) fn render_case(&mut self, case: &Value, out: &Path) -> Result<f64> {
-        if unmet(self.device.capabilities(), &case["requires"]).is_some() {
-            return Err(Error::Unsupported("a family or feature the device lacks"));
-        }
-        let mut held = Held::default();
-        let result = self.render_inner(case, out, &mut held);
-        self.release(held);
-        result
-    }
-
     fn texture_named(held: &Held, name: &str) -> Result<TextureId> {
         held.textures
             .iter()
@@ -281,25 +277,21 @@ impl Runner<'_> {
             .ok_or(Error::Invalid("an attachment names no texture"))
     }
 
-    fn render_inner(&mut self, case: &Value, out: &Path, held: &mut Held) -> Result<f64> {
-        let render = &case["render"];
+    /// Encodes a render step (a render case is one) into `commands`, over
+    /// the case's resources in `held`.
+    pub(crate) fn encode_render(
+        &mut self,
+        step: &Value,
+        library: &str,
+        held: &Held,
+        commands: &mut CommandBuffer,
+    ) -> Result<()> {
+        let case = step;
+        let render = &step["render"];
         let empty = Map::new();
-        let mut commands = self.device.new_command_buffer();
-        self.make_buffers(&case["buffers"], held)?;
-        held.textures = self.make_textures(&case["textures"], &mut commands, &mut held.buffers)?;
-        let mut samplers = Vec::new();
-        for spec in case["samplers"].as_array().into_iter().flatten() {
-            let (id, resource) = self.make_sampler(spec)?;
-            held.samplers.push(id);
-            samplers.push((
-                stage(spec),
-                resource,
-                spec["index"].as_u64().unwrap_or(0) as u32,
-            ));
-        }
 
         // The pipeline's targets and the pass's attachments.
-        let library = self.library(case["library"].as_str().unwrap_or_default())?;
+        let library = self.library(library)?;
         let constants = super::suite_constants::values(&case["constants"])?;
         let vertex = self.device.new_function(
             library,
@@ -458,6 +450,23 @@ impl Runner<'_> {
             archives: PipelineArchives::default(),
         })?;
         let state = self.device.render_pipeline_state(pipeline)?.clone();
+        // An array target renders layered, the vertex function choosing the
+        // slice, as the runner's attachments that name no slice.
+        let mut layers = 0;
+        for request in colors
+            .iter()
+            .flatten()
+            .map(|c| c.texture)
+            .chain(depth_attachment.as_ref().map(|d| d.texture))
+        {
+            let descriptor = self.device.texture_descriptor(request)?;
+            if matches!(
+                descriptor.texture_type,
+                TextureType::D2Array | TextureType::D2MultisampleArray
+            ) {
+                layers = descriptor.array_length;
+            }
+        }
         let size = |at: usize| render["target_size"][at].as_u64().unwrap_or(0);
         let pass = RenderPassRequest {
             color_attachments: colors,
@@ -467,7 +476,7 @@ impl Runner<'_> {
             stencil_resolve_filter: stencil_filter,
             visibility_result_buffer: None,
             visibility_result_type: VisibilityResultType::Reset,
-            render_target_array_length: 0,
+            render_target_array_length: layers,
             render_target_width: size(0),
             render_target_height: size(1),
             default_raster_sample_count: if render["target_size"].is_array() {
@@ -482,7 +491,7 @@ impl Runner<'_> {
         };
 
         // The encoder's state, the bindings, the draws.
-        self.device.begin_render(&mut commands, &pass)?;
+        self.device.begin_render(commands, &pass)?;
         commands.set_render_pipeline_state(&state)?;
         commands.set_depth_stencil_state(Some(&depth_stencil(&depth_stencil_descriptor)))?;
         if let Some((front, back)) = references {
@@ -544,17 +553,21 @@ impl Runner<'_> {
                 continue;
             };
             let texture = Self::texture_named(held, spec["name"].as_str().unwrap_or_default())?;
-            self.device.note_texture_binding(&mut commands, texture);
+            self.device.note_texture_binding(commands, texture);
             let resource = self.device.texture_resource_id(texture)?;
             commands.set_render_texture(stage(spec), resource, index as u32)?;
         }
-        for (stage, resource, index) in samplers {
+        for spec in case["samplers"].as_array().into_iter().flatten() {
+            let Some(index) = spec["index"].as_u64() else {
+                continue;
+            };
+            let resource = held.sampler(spec["name"].as_str().unwrap_or_default())?;
             commands.set_render_sampler(
                 &mut self.device.resolver(),
-                stage,
+                stage(spec),
                 resource,
                 None,
-                index,
+                index as u32,
             )?;
         }
         let primitive = named(
@@ -606,13 +619,6 @@ impl Runner<'_> {
                 )?;
             }
         }
-        commands.end_encoding(&mut self.device.resolver())?;
-        let readbacks = self.read_back_outputs(case, held, &mut commands)?;
-        let started = Instant::now();
-        let serial = self.device.commit(commands)?;
-        super::device::wait(self.device, serial)?;
-        let gpu_ms = started.elapsed().as_secs_f64() * 1e3;
-        self.store_outputs(case, held, &readbacks, out)?;
-        Ok(gpu_ms)
+        commands.end_encoding(&mut self.device.resolver())
     }
 }

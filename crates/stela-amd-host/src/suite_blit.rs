@@ -1,10 +1,9 @@
 //! The suite's blit cases, as the Mac's runner encodes them (`encode_blits`
 //! in `runner.m`): buffers and textures, then each blit in order on one
 //! encoder.
-use super::suite::{BASIC_OUTPUT, Held, Runner, unmet};
+use super::suite::{BASIC_OUTPUT, Held, Runner};
 use super::suite_resources::blit_option;
 use serde_json::Value;
-use std::{path::Path, time::Instant};
 use stela_driver_gpu::metal::{
     capabilities::FormatCapabilities,
     command_buffer::{
@@ -74,33 +73,18 @@ fn triple(value: &Value, default: u64) -> [u64; 3] {
 }
 
 impl Runner<'_> {
-    /// Runs one blit case; the GPU's milliseconds.
-    pub(crate) fn blit_case(&mut self, case: &Value, out: &Path) -> Result<f64> {
-        if unmet(self.device.capabilities(), &case["requires"]).is_some() {
-            return Err(Error::Unsupported("a family or feature the device lacks"));
-        }
-        let mut held = Held::default();
-        let result = self.blit_inner(case, out, &mut held);
-        self.release(held);
-        result
-    }
-
-    fn blit_inner(&mut self, case: &Value, out: &Path, held: &mut Held) -> Result<f64> {
-        let mut commands = self.device.new_command_buffer();
-        self.make_buffers(&case["buffers"], held)?;
-        held.textures = self.make_textures(&case["textures"], &mut commands, &mut held.buffers)?;
+    /// Encodes a blit step (a blit case is one) into `commands`.
+    pub(crate) fn encode_blits(
+        &mut self,
+        step: &Value,
+        held: &Held,
+        commands: &mut CommandBuffer,
+    ) -> Result<()> {
         commands.begin_blit()?;
-        for op in case["blits"].as_array().into_iter().flatten() {
-            self.blit(op, held, &mut commands)?;
+        for op in step["blits"].as_array().into_iter().flatten() {
+            self.blit(op, held, commands)?;
         }
-        commands.end_encoding(&mut self.device.resolver())?;
-        let readbacks = self.read_back_outputs(case, held, &mut commands)?;
-        let started = Instant::now();
-        let serial = self.device.commit(commands)?;
-        super::device::wait(self.device, serial)?;
-        let gpu_ms = started.elapsed().as_secs_f64() * 1e3;
-        self.store_outputs(case, held, &readbacks, out)?;
-        Ok(gpu_ms)
+        commands.end_encoding(&mut self.device.resolver())
     }
 
     fn blit(&mut self, op: &Value, held: &Held, commands: &mut CommandBuffer) -> Result<()> {

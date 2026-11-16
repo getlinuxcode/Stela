@@ -19,15 +19,19 @@ use std::{
     time::Instant,
 };
 use stela_driver_gpu::metal::{
-    abi::{ArgumentBuffersTier, DispatchType, GpuFamily, IndexType, ReadWriteTextureTier},
+    abi::{
+        ArgumentBuffersTier, BarrierScope, DispatchType, GpuFamily, IndexType, ReadWriteTextureTier,
+    },
+    binding::ResourceId,
     capabilities::{Capabilities, Size},
     command_buffer::{CommandBuffer, ComputePipelineState},
     device::{
-        BufferId, LibraryId, SamplerId,
+        BufferId, LibraryId, SamplerId, TextureId,
         pipelines::{ComputePipelineRequest, LinkedFunctions, PipelineArchives},
     },
     error::{Error, Result},
     vertex::{Attribute, StageInLayout, StageInStep, StageInputDescriptor, VertexFormat},
+    vulkan::object::Semaphore,
 };
 
 const BASIC_CASE: [&str; 17] = [
@@ -106,6 +110,69 @@ fn basic(case: &Value) -> bool {
             ))
 }
 
+/// Whether the runner reproduces the sequence exactly: each step is a case
+/// of its kind it reproduces, over the case's resources.
+fn sequence(case: &Value) -> bool {
+    const CASE: [&str; 9] = [
+        "buffers", "kind", "library", "name", "outputs", "requires", "samplers", "steps",
+        "textures",
+    ];
+    /// What steps add to a case of their kind: sequencing, and fences and
+    /// resource uses that Stela's hazard tracking covers.
+    const STEP: [&str; 9] = [
+        "barrier",
+        "concurrent",
+        "continue",
+        "new_command_buffer",
+        "signal_events",
+        "update_fences",
+        "use",
+        "wait_events",
+        "wait_fences",
+    ];
+    let only = |value: &Value, keys: &[&str]| {
+        value
+            .as_object()
+            .is_some_and(|object| object.keys().all(|key| keys.contains(&key.as_str())))
+    };
+    let all = |value: &Value, keys: &[&str]| {
+        value.is_null()
+            || value
+                .as_array()
+                .is_some_and(|items| items.iter().all(|item| only(item, keys)))
+    };
+    case["kind"] == "sequence"
+        && only(case, &CASE)
+        && all(&case["buffers"], &BASIC_BUFFER)
+        && all(&case["textures"], &super::suite_resources::TEXTURE)
+        && case["textures"].as_array().into_iter().flatten().all(|t| {
+            super::suite_resources::texture_type(t["type"].as_str().unwrap_or("2d")).is_some()
+        })
+        && all(&case["samplers"], &super::suite_resources::SAMPLER)
+        && case["steps"].as_array().is_some_and(|steps| {
+            steps.iter().all(|step| {
+                let mut alone = step.clone();
+                let Some(object) = alone.as_object_mut() else {
+                    return false;
+                };
+                for key in STEP {
+                    object.remove(key);
+                }
+                // A step binds the case's resources by name and index.
+                object.insert("name".into(), case["name"].clone());
+                object.insert("library".into(), case["library"].clone());
+                object.insert("outputs".into(), Value::Array(Vec::new()));
+                match step["kind"].as_str() {
+                    Some("compute") => basic(&alone),
+                    Some("render") => super::suite_render::basic(&alone),
+                    Some("blit") => super::suite_blit::basic(&alone),
+                    _ => false,
+                }
+            })
+        })
+        && super::suite_render::all_outputs(&case["outputs"])
+}
+
 /// Runs the selected cases of the suite in `dir`; `only` keeps the cases
 /// whose names contain one of its texts.
 pub fn run(
@@ -132,11 +199,11 @@ pub fn run(
     let cases = plan["cases"].as_array().map_or(&[][..], Vec::as_slice);
     for case in cases {
         let name = case["name"].as_str().unwrap_or_default();
-        let render = super::suite_render::basic(case);
-        let blit = super::suite_blit::basic(case);
-        if !(basic(case) || render || blit)
-            || !(only.is_empty() || only.iter().any(|text| name.contains(text)))
-        {
+        let runs = basic(case)
+            || super::suite_render::basic(case)
+            || super::suite_blit::basic(case)
+            || sequence(case);
+        if !runs || !(only.is_empty() || only.iter().any(|text| name.contains(text))) {
             continue;
         }
         let out = results.join(name);
@@ -149,14 +216,7 @@ pub fn run(
         let crashed = json!({"status": "failed", "error": "the runner crashed"});
         fs::write(out.join("status.json"), crashed.to_string()).map_err(|e| e.to_string())?;
         let begun = Instant::now();
-        let ran = if blit {
-            runner.blit_case(case, &out)
-        } else if render {
-            runner.render_case(case, &out)
-        } else {
-            runner.case(case, &out)
-        };
-        let status = match ran {
+        let status = match runner.run_case(case, &out) {
             Ok(gpu_ms) => {
                 ok += 1;
                 json!({"status": "ok", "gpu_ms": gpu_ms, "seconds": begun.elapsed().as_secs_f64()})
@@ -240,7 +300,29 @@ pub(crate) struct Held {
     /// The case's buffers by name: an index into `buffers`.
     pub(crate) named: BTreeMap<String, usize>,
     pub(crate) textures: Vec<(String, super::suite_resources::Texture)>,
-    pub(crate) samplers: Vec<SamplerId>,
+    pub(crate) samplers: Vec<(String, SamplerId, ResourceId)>,
+    /// The sequence's events, by name.
+    pub(crate) events: BTreeMap<String, Semaphore>,
+}
+
+impl Held {
+    /// The sampler the case names `name`.
+    pub(crate) fn sampler(&self, name: &str) -> Result<ResourceId> {
+        self.samplers
+            .iter()
+            .find(|(n, ..)| n == name)
+            .map(|(_, _, resource)| *resource)
+            .ok_or(Error::Invalid("a binding names no sampler"))
+    }
+
+    /// The texture the case names `name`.
+    pub(crate) fn texture(&self, name: &str) -> Result<TextureId> {
+        self.textures
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, texture)| texture.id)
+            .ok_or(Error::Invalid("a binding names no texture"))
+    }
 }
 
 /// A kernel's stage input, as the runner's `stage_input_descriptor`.
@@ -452,31 +534,131 @@ impl Runner<'_> {
         for (_, texture) in held.textures {
             let _ = self.device.destroy_texture(texture.id);
         }
-        for sampler in held.samplers {
+        for (_, sampler, _) in held.samplers {
             let _ = self.device.destroy_sampler(sampler);
         }
         let _ = self.device.poll();
         while self.device.retired().is_some() {}
     }
 
-    /// Runs one compute case; the GPU's milliseconds.
-    fn case(&mut self, case: &Value, out: &Path) -> Result<f64> {
-        if let Some(missing) = unmet(self.device.capabilities(), &case["requires"]) {
-            let _ = missing;
+    /// Runs one case, a sequence of steps or a single step; the GPU's
+    /// milliseconds.
+    fn run_case(&mut self, case: &Value, out: &Path) -> Result<f64> {
+        if unmet(self.device.capabilities(), &case["requires"]).is_some() {
             return Err(Error::Unsupported("a family or feature the device lacks"));
         }
         let mut held = Held::default();
-        let result = self.compute_inner(case, out, &mut held);
+        let result = self.run_steps(case, out, &mut held);
         self.release(held);
         result
     }
 
-    fn compute_inner(&mut self, case: &Value, out: &Path, held: &mut Held) -> Result<f64> {
-        let library = case["library"].as_str().unwrap_or_default();
-        let function = case["function"].as_str().unwrap_or_default();
+    /// Makes the case's resources, encodes its steps in order as the
+    /// runner's `run_sequence` (a step may start a new command buffer, and
+    /// waits for and signals events between encoders), then reads back its
+    /// outputs once the last command buffer completes.
+    fn run_steps(&mut self, case: &Value, out: &Path, held: &mut Held) -> Result<f64> {
+        let sequence = case["kind"] == "sequence";
+        let mut commands = self.device.new_command_buffer();
+        self.make_buffers(&case["buffers"], held)?;
+        held.textures = self.make_textures(&case["textures"], &mut commands, &mut held.buffers)?;
+        for spec in case["samplers"].as_array().into_iter().flatten() {
+            let (id, resource) = self.make_sampler(spec)?;
+            held.samplers.push((
+                spec["name"].as_str().unwrap_or_default().to_owned(),
+                id,
+                resource,
+            ));
+        }
+        let steps: Vec<&Value> = if sequence {
+            case["steps"].as_array().into_iter().flatten().collect()
+        } else {
+            vec![case]
+        };
+        let mut open = false;
+        let started = Instant::now();
+        for step in steps {
+            let kind = if sequence {
+                &step["kind"]
+            } else {
+                &case["kind"]
+            };
+            let continues = kind == "compute" && step["continue"] == true && open;
+            if open && !continues {
+                commands.end_encoding(&mut self.device.resolver())?;
+                open = false;
+            }
+            if step["new_command_buffer"] == true {
+                let previous = core::mem::replace(&mut commands, self.device.new_command_buffer());
+                self.device.commit(previous)?;
+            }
+            for wait in step["wait_events"].as_array().into_iter().flatten() {
+                let event = self.event(held, wait[0].as_str().unwrap_or_default())?;
+                let value = wait[1].as_u64().unwrap_or(0);
+                commands.encode_wait_for_event(&mut self.device.resolver(), event, value)?;
+            }
+            let library = step["library"]
+                .as_str()
+                .or(case["library"].as_str())
+                .unwrap_or_default();
+            match kind.as_str() {
+                Some("compute") => {
+                    self.encode_compute(step, library, held, &mut commands, continues)?;
+                    open = true;
+                }
+                Some("render") => self.encode_render(step, library, held, &mut commands)?,
+                Some("blit") => self.encode_blits(step, held, &mut commands)?,
+                _ => return Err(Error::Unsupported("a step kind")),
+            }
+            let signals = step["signal_events"]
+                .as_array()
+                .map_or(&[][..], Vec::as_slice);
+            if open && !signals.is_empty() {
+                commands.end_encoding(&mut self.device.resolver())?;
+                open = false;
+            }
+            for signal in signals {
+                let event = self.event(held, signal[0].as_str().unwrap_or_default())?;
+                let value = signal[1].as_u64().unwrap_or(0);
+                commands.encode_signal_event(&mut self.device.resolver(), event, value)?;
+            }
+        }
+        if open {
+            commands.end_encoding(&mut self.device.resolver())?;
+        }
+        let readbacks = self.read_back_outputs(case, held, &mut commands)?;
+        let serial = self.device.commit(commands)?;
+        wait(self.device, serial)?;
+        let gpu_ms = started.elapsed().as_secs_f64() * 1e3;
+        self.store_outputs(case, held, &readbacks, out)?;
+        Ok(gpu_ms)
+    }
+
+    /// The event the sequence names `name`, made on first use.
+    fn event(&mut self, held: &mut Held, name: &str) -> Result<Semaphore> {
+        if let Some(&event) = held.events.get(name) {
+            return Ok(event);
+        }
+        let id = self.device.new_event()?;
+        let event = self.device.event_semaphore(id)?;
+        held.events.insert(name.to_owned(), event);
+        Ok(event)
+    }
+
+    /// Encodes a compute step (a compute case is one) into `commands`,
+    /// continuing the open compute encoder when `continues`.
+    fn encode_compute(
+        &mut self,
+        step: &Value,
+        library: &str,
+        held: &Held,
+        commands: &mut CommandBuffer,
+        continues: bool,
+    ) -> Result<()> {
+        let function = step["function"].as_str().unwrap_or_default();
         let triple = |field: &str, default: u64| -> [u64; 3] {
             let item = |at: usize| {
-                case[field][at]
+                step[field][at]
                     .as_u64()
                     .unwrap_or(if at == 0 { default } else { 1 })
             };
@@ -484,60 +666,66 @@ impl Runner<'_> {
         };
         let grid = triple("grid", 1);
         let group = triple("threadgroup", 64);
-        let state = self.pipeline(library, function, group, case)?;
-
-        let mut commands = self.device.new_command_buffer();
-        self.make_buffers(&case["buffers"], held)?;
-        held.textures = self.make_textures(&case["textures"], &mut commands, &mut held.buffers)?;
-        let mut samplers = Vec::new();
-        for spec in case["samplers"].as_array().into_iter().flatten() {
-            let (id, resource) = self.make_sampler(spec)?;
-            held.samplers.push(id);
-            samplers.push((resource, spec["index"].as_u64().unwrap_or(0) as u32));
+        let state = self.pipeline(library, function, group, step)?;
+        if !continues {
+            let dispatch = if step["concurrent"] == true {
+                DispatchType::Concurrent
+            } else {
+                DispatchType::Serial
+            };
+            commands.begin_compute(dispatch)?;
+        } else if step["barrier"] == "buffers" {
+            commands.compute_memory_barrier(BarrierScope::BUFFERS)?;
         }
-        commands.begin_compute(DispatchType::Serial)?;
         commands.set_compute_pipeline_state(&state)?;
-        for spec in case["buffers"].as_array().into_iter().flatten() {
+        for spec in step["buffers"].as_array().into_iter().flatten() {
             let name = spec["name"].as_str().unwrap_or_default();
-            let buffer = &held.buffers[held.named[name]];
+            let at = *held
+                .named
+                .get(name)
+                .ok_or(Error::Invalid("a binding names no buffer"))?;
             let Some(slot) = spec["index"].as_u64() else {
                 continue;
             };
-            commands.set_compute_buffer(Some(self.device.buffer(buffer.id)?), 0, slot as u32)?;
+            let reference = self.device.buffer(held.buffers[at].id)?;
+            commands.set_compute_buffer(Some(reference), 0, slot as u32)?;
         }
-        for (_, texture) in &held.textures {
-            if let Some(index) = texture.index {
-                self.device.note_texture_binding(&mut commands, texture.id);
-                let resource = self.device.texture_resource_id(texture.id)?;
-                commands.set_compute_texture(resource, index)?;
-            }
+        for spec in step["textures"].as_array().into_iter().flatten() {
+            let Some(index) = spec["index"].as_u64() else {
+                continue;
+            };
+            let texture = held.texture(spec["name"].as_str().unwrap_or_default())?;
+            self.device.note_texture_binding(commands, texture);
+            let resource = self.device.texture_resource_id(texture)?;
+            commands.set_compute_texture(resource, index as u32)?;
         }
-        for (resource, index) in samplers {
-            commands.set_compute_sampler(&mut self.device.resolver(), resource, None, index)?;
+        for spec in step["samplers"].as_array().into_iter().flatten() {
+            let Some(index) = spec["index"].as_u64() else {
+                continue;
+            };
+            let resource = held.sampler(spec["name"].as_str().unwrap_or_default())?;
+            commands.set_compute_sampler(
+                &mut self.device.resolver(),
+                resource,
+                None,
+                index as u32,
+            )?;
         }
         let threads = Size {
             width: group[0],
             height: group[1],
             depth: group[2],
         };
-        if case["dispatch"] == "threads" {
-            if case["stage_input"].is_object() {
+        if step["dispatch"] == "threads" {
+            if step["stage_input"].is_object() {
                 commands.set_stage_in_region([0; 3], grid)?;
             }
             let grid = grid.map(|size| size as u32);
-            commands.dispatch_threads(&mut self.device.resolver(), grid, threads)?;
+            commands.dispatch_threads(&mut self.device.resolver(), grid, threads)
         } else {
             let groups = [0, 1, 2].map(|axis| grid[axis].div_ceil(group[axis]) as u32);
-            commands.dispatch_threadgroups(&mut self.device.resolver(), groups, threads)?;
+            commands.dispatch_threadgroups(&mut self.device.resolver(), groups, threads)
         }
-        commands.end_encoding(&mut self.device.resolver())?;
-        let readbacks = self.read_back_outputs(case, held, &mut commands)?;
-        let started = Instant::now();
-        let serial = self.device.commit(commands)?;
-        wait(self.device, serial)?;
-        let gpu_ms = started.elapsed().as_secs_f64() * 1e3;
-        self.store_outputs(case, held, &readbacks, out)?;
-        Ok(gpu_ms)
     }
 
     /// The Metal library the Mac compiled as `name`, loaded once.

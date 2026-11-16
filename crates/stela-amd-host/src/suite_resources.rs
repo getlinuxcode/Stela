@@ -89,8 +89,6 @@ pub struct Subresource {
 pub struct Texture {
     pub id: TextureId,
     pub descriptor: TextureDescriptor,
-    /// Its binding index, for a compute or fragment function.
-    pub index: Option<u32>,
 }
 
 /// Whether `format` holds depth and stencil, whose aspects copy apart.
@@ -202,11 +200,7 @@ impl Runner<'_> {
                 swizzle: SwizzleChannels::IDENTITY,
             };
             let id = self.device.new_texture(&descriptor)?;
-            let texture = Texture {
-                id,
-                descriptor,
-                index: spec["index"].as_u64().map(|index| index as u32),
-            };
+            let texture = Texture { id, descriptor };
             for (key, aspect) in [
                 ("file", spec["aspect"].as_str()),
                 ("stencil_file", Some("stencil")),

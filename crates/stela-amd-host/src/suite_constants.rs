@@ -27,8 +27,10 @@ pub fn values(constants: &Value) -> Result<Vec<ConstantValue>> {
                 return Err(Error::Invalid("a constant range"));
             }
             for (at, chunk) in bytes.chunks(size).take(count).enumerate() {
+                let key = ConstantKey::Index(start + at as u32);
+                out.retain(|value: &ConstantValue| value.key != key);
                 out.push(ConstantValue {
-                    key: ConstantKey::Index(start + at as u32),
+                    key,
                     data_type,
                     value: chunk.to_vec(),
                 });
@@ -39,6 +41,9 @@ pub fn values(constants: &Value) -> Result<Vec<ConstantValue>> {
             Some(name) => ConstantKey::Name(name.to_owned()),
             None => ConstantKey::Index(spec["index"].as_u64().unwrap_or(0) as u32),
         };
+        // A constant set again takes its last value, as
+        // MTLFunctionConstantValues keeps.
+        out.retain(|value: &ConstantValue| value.key != key);
         out.push(ConstantValue {
             key,
             data_type,
