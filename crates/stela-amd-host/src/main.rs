@@ -34,6 +34,8 @@ use stela_driver_gpu::metal::{
 mod device;
 #[cfg(feature = "radv-host")]
 mod suite;
+#[cfg(feature = "radv-host")]
+mod suite_render;
 mod sysfs;
 
 fn log(message: &str) {

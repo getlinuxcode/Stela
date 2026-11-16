@@ -92,7 +92,10 @@ pub fn run(
     let cases = plan["cases"].as_array().map_or(&[][..], Vec::as_slice);
     for case in cases {
         let name = case["name"].as_str().unwrap_or_default();
-        if !basic(case) || !(only.is_empty() || only.iter().any(|text| name.contains(text))) {
+        let render = super::suite_render::basic(case);
+        if !(basic(case) || render)
+            || !(only.is_empty() || only.iter().any(|text| name.contains(text)))
+        {
             continue;
         }
         let out = results.join(name);
@@ -102,7 +105,12 @@ pub fn run(
         }
         fs::create_dir_all(&out).map_err(|error| error.to_string())?;
         let begun = Instant::now();
-        let status = match runner.case(case, &out) {
+        let ran = if render {
+            runner.render_case(case, &out)
+        } else {
+            runner.case(case, &out)
+        };
+        let status = match ran {
             Ok(gpu_ms) => {
                 ok += 1;
                 json!({"status": "ok", "gpu_ms": gpu_ms, "seconds": begun.elapsed().as_secs_f64()})
@@ -134,15 +142,31 @@ pub fn run(
     Ok(())
 }
 
-struct Runner<'a> {
-    device: &'a mut MetalDevice,
-    exporter: &'a Exporter,
-    plan_dir: PathBuf,
+pub(crate) struct Runner<'a> {
+    pub(crate) device: &'a mut MetalDevice,
+    pub(crate) exporter: &'a Exporter,
+    pub(crate) plan_dir: PathBuf,
     libraries: BTreeMap<String, LibraryId>,
     /// By library, function and threadgroup width, height and depth.
     pipelines: BTreeMap<(String, String, [u64; 3]), ComputePipelineState>,
     /// The next fake guest range index each import takes.
-    next_import: u64,
+    pub(crate) next_import: u64,
+}
+
+/// The value of `all` the runner names `name`: its Rust name, compared
+/// without case or underscores (`bgr10_xr` is `Bgr10Xr`, `source_alpha`
+/// `SourceAlpha`).
+pub(crate) fn named<T: Copy + core::fmt::Debug>(all: &[T], name: &str) -> Option<T> {
+    let plain = |text: &str| -> String {
+        text.chars()
+            .filter(|c| *c != '_')
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let name = plain(name);
+    all.iter()
+        .copied()
+        .find(|value| plain(&format!("{value:?}")) == name)
 }
 
 impl Runner<'_> {
@@ -231,6 +255,21 @@ impl Runner<'_> {
         result
     }
 
+    /// The Metal library the Mac compiled as `name`, loaded once.
+    pub(crate) fn library(&mut self, name: &str) -> Result<LibraryId> {
+        if let Some(&id) = self.libraries.get(name) {
+            return Ok(id);
+        }
+        let path = self.plan_dir.join("lib").join(format!("{name}.metallib"));
+        // The suite compiles its *_runtime_* libraries from MSL source as the
+        // case runs, which only a Mac's compiler does.
+        let bytes = fs::read(&path)
+            .map_err(|_| Error::Unsupported("a library compiled from source at run time"))?;
+        let id = self.device.new_library(bytes)?;
+        self.libraries.insert(name.to_owned(), id);
+        Ok(id)
+    }
+
     fn pipeline(
         &mut self,
         library: &str,
@@ -241,23 +280,7 @@ impl Runner<'_> {
         if let Some(state) = self.pipelines.get(&key) {
             return Ok(state.clone());
         }
-        let library = match self.libraries.get(library) {
-            Some(&id) => id,
-            None => {
-                let path = self
-                    .plan_dir
-                    .join("lib")
-                    .join(format!("{library}.metallib"));
-                // The suite compiles its *_runtime_* libraries from MSL source
-                // as the case runs, which only a Mac's compiler does.
-                let bytes = fs::read(&path).map_err(|_| {
-                    Error::Unsupported("a library compiled from source at run time")
-                })?;
-                let id = self.device.new_library(bytes)?;
-                self.libraries.insert(library.to_owned(), id);
-                id
-            }
-        };
+        let library = self.library(library)?;
         let function = self.device.new_function(library, function, Some(&[]))?;
         let pipeline = self.device.new_compute_pipeline(&ComputePipelineRequest {
             compute_function: function,
