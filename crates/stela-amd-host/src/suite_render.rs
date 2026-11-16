@@ -32,7 +32,10 @@ use stela_driver_gpu::metal::{
     vertex::{Attribute, Layout, StepFunction, VertexDescriptor, VertexFormat},
 };
 
-const CASE: [&str; 15] = [
+const CASE: [&str; 18] = [
+    "arguments",
+    "heaps",
+    "use_heaps",
     "bind",
     "buffers",
     "constants",
@@ -123,7 +126,10 @@ const STENCIL: [&str; 14] = [
     "texture",
     "write_mask",
 ];
-const BUFFER: [&str; 11] = [
+const BUFFER: [&str; 14] = [
+    "alias_of",
+    "heap",
+    "heap_offset",
     "attribute_stride",
     "inline",
     "mutability",
@@ -167,6 +173,8 @@ pub fn basic(case: &Value) -> bool {
     case["kind"] == "render"
         && only(case, &CASE)
         && only(render, &RENDER)
+        && all(&case["heaps"], &super::suite_heaps::HEAP)
+        && super::suite_arguments::supported(case)
         && (render["tessellation"].is_null() || only(&render["tessellation"], &TESSELLATION))
         && (render["mesh"].is_null() || only(&render["mesh"], &MESH))
         && all(&render["colors"], &COLOR)

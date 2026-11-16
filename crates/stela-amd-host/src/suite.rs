@@ -34,7 +34,7 @@ use stela_driver_gpu::metal::{
     vulkan::object::Semaphore,
 };
 
-const BASIC_CASE: [&str; 19] = [
+const BASIC_CASE: [&str; 22] = [
     "buffers",
     "constants",
     "stage_input",
@@ -54,10 +54,16 @@ const BASIC_CASE: [&str; 19] = [
     "threadgroup_memory",
     "timeout",
     "bind",
+    "heaps",
+    "use_heaps",
+    "arguments",
 ];
 /// `storage` and `write_combined` change where the CPU reaches a buffer,
 /// not what it holds.
-const BASIC_BUFFER: [&str; 10] = [
+const BASIC_BUFFER: [&str; 13] = [
+    "alias_of",
+    "heap",
+    "heap_offset",
     "attribute_stride",
     "inline",
     "mutability",
@@ -105,6 +111,8 @@ fn basic(case: &Value) -> bool {
     };
     case["kind"] == "compute"
         && only(case, &BASIC_CASE)
+        && all("heaps", &super::suite_heaps::HEAP)
+        && super::suite_arguments::supported(case)
         && all("buffers", &BASIC_BUFFER)
         && all("outputs", &BASIC_OUTPUT)
         && all("textures", &super::suite_resources::TEXTURE)
@@ -123,8 +131,8 @@ fn basic(case: &Value) -> bool {
 /// Whether the runner reproduces the sequence exactly: each step is a case
 /// of its kind it reproduces, over the case's resources.
 fn sequence(case: &Value) -> bool {
-    const CASE: [&str; 9] = [
-        "buffers", "kind", "library", "name", "outputs", "requires", "samplers", "steps",
+    const CASE: [&str; 11] = [
+        "arguments", "buffers", "heaps", "kind", "library", "name", "outputs", "requires", "samplers", "steps",
         "textures",
     ];
     /// What steps add to a case of their kind: sequencing, and fences and
@@ -153,6 +161,8 @@ fn sequence(case: &Value) -> bool {
     };
     case["kind"] == "sequence"
         && only(case, &CASE)
+        && all(&case["heaps"], &super::suite_heaps::HEAP)
+        && super::suite_arguments::supported(case)
         && all(&case["buffers"], &BASIC_BUFFER)
         && all(&case["textures"], &super::suite_resources::TEXTURE)
         && case["textures"].as_array().into_iter().flatten().all(|t| {
@@ -313,6 +323,7 @@ pub(crate) struct Held {
     pub(crate) samplers: Vec<(String, SamplerId, ResourceId)>,
     /// The sequence's events, by name.
     pub(crate) events: BTreeMap<String, Semaphore>,
+    pub(crate) heaps: Vec<super::suite_heaps::Heap>,
 }
 
 impl Held {
@@ -469,7 +480,12 @@ impl Runner<'_> {
     pub(crate) fn make_buffers(&mut self, specs: &Value, held: &mut Held) -> Result<()> {
         for spec in specs.as_array().into_iter().flatten() {
             let data = self.input(spec)?;
-            let shared = self.shared(&data, spec["length"].as_u64().unwrap_or(16))?;
+            let length = spec["length"].as_u64().unwrap_or(16);
+            let shared = if spec["heap"].is_string() {
+                self.heap_buffer(spec, &data, length, held)?
+            } else {
+                self.shared(&data, length)?
+            };
             let name = spec["name"].as_str().unwrap_or_default().to_owned();
             held.named.insert(name, held.buffers.len());
             held.buffers.push(shared);
@@ -557,6 +573,10 @@ impl Runner<'_> {
         }
         let _ = self.device.poll();
         while self.device.retired().is_some() {}
+        // Heaps once their resources are gone.
+        for heap in held.heaps {
+            let _ = self.device.destroy_heap(heap.id);
+        }
     }
 
     /// Runs one case, a sequence of steps or a single step; the GPU's
@@ -578,6 +598,7 @@ impl Runner<'_> {
     fn run_steps(&mut self, case: &Value, out: &Path, held: &mut Held) -> Result<f64> {
         let sequence = case["kind"] == "sequence";
         let mut commands = self.device.new_command_buffer();
+        self.make_heaps(&case["heaps"], held)?;
         self.make_buffers(&case["buffers"], held)?;
         held.textures = self.make_textures(&case["textures"], &mut commands, &mut held.buffers)?;
         for spec in case["samplers"].as_array().into_iter().flatten() {
@@ -588,6 +609,7 @@ impl Runner<'_> {
                 resource,
             ));
         }
+        self.encode_arguments(case, held)?;
         let steps: Vec<&Value> = if sequence {
             case["steps"].as_array().into_iter().flatten().collect()
         } else {

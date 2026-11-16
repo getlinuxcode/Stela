@@ -47,8 +47,9 @@ pub const TEXTURE: [&str; 19] = [
     "usage",
     "width",
 ];
-pub const SAMPLER: [&str; 15] = [
+pub const SAMPLER: [&str; 16] = [
     "address",
+    "argument_buffers",
     "reduction",
     "bind_lod",
     "anisotropy",

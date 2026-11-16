@@ -409,6 +409,23 @@ pub(crate) fn shared_buffer(
     Ok((buffer, pointer))
 }
 
+/// `bytes` of shared memory as the guest's would be: imported, and mapped
+/// for the CPU.
+pub(crate) fn shared_memory(
+    device: &mut MetalDevice,
+    exporter: &Exporter,
+    index: u64,
+    bytes: u64,
+) -> Result<(stela_driver_gpu::metal::device::MemoryId, NonNull<u8>)> {
+    let address = index << 32;
+    let token = NonZeroU64::new(index).expect("indices start at one");
+    let memory = device.import_memory(&[MemoryRange { address, bytes }], token)?;
+    let pointer = exporter
+        .mapping(address)
+        .ok_or(Error::Invalid("the import made no export"))?;
+    Ok((memory, pointer))
+}
+
 /// Exports memfd pages as dma-bufs through `/dev/udmabuf`.
 #[derive(Clone, Default)]
 pub(crate) struct Exporter {
