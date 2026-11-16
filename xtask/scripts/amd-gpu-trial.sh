@@ -30,6 +30,7 @@ card=${STELA_VFIO_GPU:-0000:07:00.0}
 
 build() {
   cd "$root" || exit 1
+  python3 -I xtask/scripts/amd-firmware-bundle.py || exit 1
   # The engine's test kernel, with the GPU trial added to its options.
   cargo build --offline --release --manifest-path crates/stela-boot/Cargo.toml \
     --target x86_64-unknown-uefi --target-dir target/boot \
@@ -58,6 +59,10 @@ run() {
   } >"$report"
   start=$(date +%s)
   dmesg_from=$(dmesg | wc -l)
+  # amdgpu's pinned files, as a USB bundle on the boot volume.
+  [[ -f $root/.stela/vm/amdgpu-firmware/stela/firmware/bundle.json ]] ||
+    echo "amd-gpu-trial: no firmware bundle (xtask/scripts/amd-firmware-bundle.py): amdgpu stops at its first file" >&2
+  export STELA_BOOT_VOLUME_EXTRA=$root/.stela/vm/amdgpu-firmware
   "$root/xtask/scripts/vfio-gpu.sh" run --stop-desktop --autologin --seconds 900 -- \
     bash -c "cd '$root' && '$home/.cargo/bin/cargo' xtask boot run --kvm --vfio-gpu '$card' \
       --image '$image' --display none --timeout 120 --output '$out' \

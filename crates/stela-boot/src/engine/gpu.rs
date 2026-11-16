@@ -1493,7 +1493,7 @@ pub(super) fn claim_all(
                 output::arguments(format_args!("GPU {} refused: {why}\n", adapter.address));
                 ServiceError::Refused("the firmware's screen could not be verified")
             })
-            .and_then(|gop| amd::claim(services, adapter, claimed.len() as u32, gop));
+            .and_then(|gop| amd::claim(services, adapter, claimed.len() as u32, gop, catalog));
         match result {
             Ok(function) => claimed.push(function),
             Err(error) => {

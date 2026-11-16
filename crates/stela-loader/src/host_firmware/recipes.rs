@@ -135,7 +135,13 @@ enum Consumer {
     IntelRsa,
     Wifi,
     Nouveau,
+    /// AMD fork (J6): amdgpu's files for an RDNA 4 Radeon (`amdgpu.rs`).
+    Amdgpu,
 }
+
+// AMD fork (J6): amdgpu's pinned files.
+mod amdgpu;
+pub use amdgpu::{AMDGPU, AMDGPU_DEVICES, AMDGPU_TARGET, require_amdgpu};
 
 const fn realtek(
     member: &'static str,
@@ -1361,6 +1367,7 @@ pub fn recipe(request: &Request) -> Option<&'static Recipe> {
         "mediatek-bluetooth-usb-mt79xx-v1" => select_mediatek_bluetooth(request),
         "realtek-wifi" => select_realtek_wifi(request),
         "nouveau" => select_gsp(request),
+        "amdgpu" => amdgpu::select_amdgpu(request),
         _ => None,
     }
 }

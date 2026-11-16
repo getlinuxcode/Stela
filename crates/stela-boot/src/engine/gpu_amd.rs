@@ -2,9 +2,9 @@
 //!
 //! As [`super::claim`] does for an NVIDIA GPU, with what differs on a
 //! Radeon: its register window is BAR 5 (BAR 0 is VRAM and BAR 2 the
-//! doorbells), it has no PMC_BOOT_0, and the firmware amdgpu requests is not
-//! yet pinned, so its catalogue is empty and amdgpu's requests fail as
-//! missing files (`request_firmware` returns -ENOENT) until it is.
+//! doorbells), it has no PMC_BOOT_0, and its firmware is amdgpu's pinned
+//! files (`stela_loader::host_firmware::recipes::AMDGPU`), found in the
+//! USB's bundle by digest and bound to the names amdgpu requests.
 use super::*;
 
 const AMD: u16 = 0x1002;
@@ -13,18 +13,109 @@ const REGISTER_BAR: usize = 5;
 /// The Revision ID register in configuration space.
 const REVISION_ID: u16 = 0x08;
 
-/// The empty catalogue an AMD GPU starts with, under amdgpu's target.
-fn firmware(device: u16, revision: u8) -> Result<PciFirmware, ServiceError> {
-    let target = FirmwareTarget::new(
-        "amdgpu".to_owned(),
-        format!("1002:{device:04x}"),
-        format!("{revision:02x}"),
-        None,
-    )
-    .map_err(|_| ServiceError::Refused("the GPU firmware target is invalid"))?;
-    let catalog = Catalog::rebind_all(core::iter::empty())
-        .map_err(|_| ServiceError::Refused("the GPU firmware catalogue cannot be made"))?;
-    PciFirmware::new(target, Arc::new(catalog), Box::new([]))
+/// amdgpu's catalogue for the Radeon with PCI device ID `device`: each of
+/// its pinned files the boot's catalogue holds, by exact binding or by the
+/// bundle's digest, checked against its pin. Unlike nouveau, amdgpu names
+/// the file it lacks and stops there, so a partial catalogue is kept, with
+/// a line naming what is missing.
+fn firmware(device: u16, catalog: Option<&Arc<Catalog>>) -> Result<PciFirmware, ServiceError> {
+    use stela_loader::host_firmware::{
+        bundle,
+        recipes::{self, AMDGPU_TARGET, Plan},
+        requirements::Inventory,
+    };
+    let target = || {
+        FirmwareTarget::new(
+            AMDGPU_TARGET.driver.to_owned(),
+            AMDGPU_TARGET.hardware.to_owned(),
+            AMDGPU_TARGET.revision.to_owned(),
+            None,
+        )
+        .map_err(|_| ServiceError::Refused("the GPU firmware target is invalid"))
+    };
+    let empty = |why: &str| {
+        output::arguments(format_args!(
+            "GPU 1002:{device:04x}: no amdgpu firmware: {why}\n"
+        ));
+        let catalog = Catalog::rebind_all(core::iter::empty())
+            .map_err(|_| ServiceError::Refused("the GPU firmware catalogue cannot be made"))?;
+        PciFirmware::new(target()?, Arc::new(catalog), Box::new([]))
+            .map_err(|_| ServiceError::Refused("the GPU firmware image names are invalid"))
+    };
+    let Some(catalog) = catalog else {
+        return empty("the boot has no firmware catalogue (no USB bundle)");
+    };
+    let mut inventory = Inventory::default();
+    if recipes::require_amdgpu(&mut inventory, device).is_err() {
+        return empty("no pinned files for this Radeon");
+    }
+    let plan = Plan::select(&inventory)
+        .map_err(|_| ServiceError::Refused("the GPU firmware recipe cannot be selected"))?;
+    // SAFETY: the reference count is never given back, so the catalog
+    // stays allocated for every image borrowed from it for the boot.
+    let stored: &'static Catalog = unsafe { &*Arc::into_raw(catalog.clone()) };
+    let (mut bindings, mut names, mut missing) = (Vec::new(), Vec::new(), Vec::new());
+    for selection in plan.selections() {
+        let request = &selection.request;
+        let found = match stored.load(request.view()) {
+            Err(error) if error.kind == FirmwareError::Missing => {
+                let name = bundle::name(selection.recipe.image.sha256);
+                match stored.load(stela_drivers::firmware::Requirement {
+                    name: &name,
+                    target: bundle::TARGET,
+                    minimum_bytes: request.minimum_bytes,
+                }) {
+                    Err(stored_error) if stored_error.kind == FirmwareError::Missing => Err(error),
+                    other => other,
+                }
+            }
+            other => other,
+        };
+        match found {
+            Ok(image) => {
+                selection
+                    .recipe
+                    .image
+                    .verify_digest(image.bytes().len(), image.sha256())
+                    .map_err(|_| {
+                        ServiceError::Refused(
+                            "the GPU firmware digest does not match its pinned recipe",
+                        )
+                    })?;
+                bindings.push((image, request));
+                names.push(request.name.clone());
+            }
+            Err(error) if error.kind == FirmwareError::Missing => {
+                missing.push(request.name.clone());
+            }
+            Err(error) => {
+                output::arguments(format_args!(
+                    "GPU 1002:{device:04x}: firmware {} refused: {error:?}\n",
+                    request.name
+                ));
+                return Err(ServiceError::Refused(
+                    "the GPU firmware does not match its exact catalogue target",
+                ));
+            }
+        }
+    }
+    output::arguments(format_args!(
+        "GPU 1002:{device:04x}: amdgpu firmware {} of {} files{}{}\n",
+        names.len(),
+        names.len() + missing.len(),
+        if missing.is_empty() {
+            ""
+        } else {
+            "; the USB's bundle lacks "
+        },
+        missing.join(", ")
+    ));
+    let catalog = Catalog::rebind_all(bindings.iter().map(|(image, request)| {
+        let view = request.view();
+        (*image, view.name, view.target)
+    }))
+    .map_err(|_| ServiceError::Refused("the GPU firmware cannot be bound to its requests"))?;
+    PciFirmware::new(target()?, Arc::new(catalog), names.into_boxed_slice())
         .map_err(|_| ServiceError::Refused("the GPU firmware image names are invalid"))
 }
 
@@ -34,6 +125,7 @@ pub(super) fn claim(
     adapter: &gpu::Adapter,
     line: u32,
     gop: crate::pci_io::ScreenOwner,
+    catalog: Option<&Arc<Catalog>>,
 ) -> Result<Claimed, ServiceError> {
     use crate::pci_io::ScreenOwner;
     let address = adapter.address;
@@ -156,6 +248,7 @@ pub(super) fn claim(
         .retain_epoch()
         .map_err(ServiceError::Mapping)?;
     let pci_words = gpu_pci_words(function).map_err(ServiceError::Config)?;
+    #[cfg_attr(not(feature = "nvk"), allow(unused_variables))]
     let revision = function
         .config()
         .read8(REVISION_ID)
@@ -175,7 +268,7 @@ pub(super) fn claim(
     if index == u32::MAX {
         return Err(ServiceError::Refused("the GPU's registers do not answer"));
     }
-    let firmware = firmware(adapter.device, revision)?;
+    let firmware = firmware(adapter.device, catalog)?;
     if let Some(chip) = adapter.amd_chip() {
         crate::host_inventory::text(alloc::format!("GPU{line}Chip"), chip.name);
     }
