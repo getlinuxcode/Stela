@@ -60,7 +60,7 @@ Fait sous Linux (Ubuntu 24.04, noyau 6.14, Mesa 25.2.8) :
 
 - Le clone Linux a son remote `upstream`, `git rerere` activé et l'identité des commits du fork. Rust 1.99.1 est installé par rustup.
 - J2 : `stela-amd-host` a tourné sur la 9070 XT, et sa sortie est archivée dans `docs/amd/qualification.md`. Seul manque au départ : `dynamicPrimitiveTopologyUnrestricted`, que RADV ne fournit pas. Ce n'est plus une exigence : sans cette propriété, les pipelines Metal sans classe de topologie compilent une variante pour les points et une pour les lignes. **La carte est maintenant admise** (code de sortie 0), avec l'import dma-buf, Metal3 et Apple7. Limite : ces pipelines ne sont pas proposés aux indirect command buffers.
-- J1 : `vfio-gpu.sh status` reconnaît la carte (IOMMU et Resizable BAR actifs, groupes propres). Il n'y a pas d'autre sortie d'affichage : l'écran est branché sur la 9070 XT et le processeur n'a pas de puce graphique active.
+- J1 : la 9070 XT est prêtée à Stela sous QEMU/KVM, et rendue à amdgpu sans redémarrage, trois fois d'affilée (`xtask/scripts/amd-vm-trials.sh`). Pendant l'essai, le bureau Linux s'arrête, puisque la carte est la seule sortie d'affichage.
 
 - J3 : les compilateurs de Stela sont construits avec la cible AMD et le frontal AIR (LLVM 23). La suite Metal tourne sur un Mac (M3 Pro, macOS 27.2.1) : 14 146 cas réussis, aucun échec. Les shaders de WindowServer, de CoreAnimation et de l'assistant de configuration compilent tous vers NIR pour gfx1201. Sur tout macOS, aucun refus n'est propre à AMD (`docs/amd/shaders.md`).
 
@@ -69,7 +69,7 @@ Fait sous Linux (Ubuntu 24.04, noyau 6.14, Mesa 25.2.8) :
 À faire ensuite, dans cet ordre :
 
 1. J4 : étendre l'exécuteur Linux de la suite (`stela-amd-host --suite`) au reste du rendu (profondeur, stencil, sommets, multi-échantillonnage, échantillonneurs), puis aux textures et au reste. Mesurer au passage les alignements des surfaces linéaires.
-2. J1, dernier point : le Ryzen 5 5600X n'a pas de puce graphique, et la 9070 XT est la seule sortie d'affichage. Avant le premier essai en VM, il faut ajouter une petite carte graphique pour l'écran de Linux, ou lancer l'essai par SSH et suivre la VM par VNC. L'utilisateur est maintenant dans le groupe `kvm`.
+2. J1 : le premier essai en VM est fait (trois démarrages d'affilée, carte rendue à chaque fois). Reste à voir l'écran de démarrage nommer la carte, ce qui demande le chemin de démarrage de macOS, avec une clé d'installation (`--usb-image`).
 
 ## Jalons
 
@@ -87,7 +87,8 @@ Fait sous Linux (Ubuntu 24.04, noyau 6.14, Mesa 25.2.8) :
 - [ ] Workflow GitHub Actions quotidien (`amd-sync-upstream.yml`, en place et lancé une fois sans rien à fusionner ; reste à voir une vraie fusion passer) : merge de `upstream/main` dans `sync/upstream`, tests, puis PR automatique si tout passe.
 - [x] CI propre au fork (`amd-ci.yml`) : `cargo test` sur `stela-driver-gpu` (fonctionnalités `metal`, `metal-vulkan`), `stela-boot-core` et `stela-amd-host`, plus clippy et rustfmt.
 - [x] `vfio-gpu.sh` sait prêter une Radeon RDNA 4 à la VM.
-- [ ] Premier lancement de Stela en VM avec la 9070 XT prêtée : l'écran de démarrage nomme la carte et la rend proprement à la fin. Mesurer comment la réinitialisation se comporte sur plusieurs essais d'affilée.
+- [x] Premier lancement de Stela en VM avec la 9070 XT prêtée (16 novembre 2026, `xtask/scripts/amd-vm-trials.sh`) : trois démarrages d'affilée sous QEMU/KVM, chacun en 4 s environ. Stela voit la carte (6 fonctions PCI au lieu de 3), et la carte revient à amdgpu à chaque fois, sans redémarrer l'hôte. Le bug de réinitialisation des Radeon ne s'est pas montré. Corrections en route dans `vfio-gpu.sh` : la limite de mémoire verrouillable restait abaissée par PAM (`setpriv` au lieu de `runuser`), et la fonction audio HDMI est dans son propre groupe IOMMU.
+- [ ] Voir l'écran de démarrage nommer la carte : il faut le chemin de démarrage de macOS, avec une clé d'installation (`--usb-image`). Le scénario de test du moteur ne passe pas par là.
 
 **Terminé quand** une synchronisation avec upstream passe la CI sans intervention.
 
