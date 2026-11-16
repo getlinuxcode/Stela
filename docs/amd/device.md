@@ -65,7 +65,31 @@ Pour vérifier que ce RADV admet toujours la carte, sans `--device` :
 VK_DRIVER_FILES=<un fichier ICD JSON pointant sur libstela_radv.so> ./target/release/stela-amd-host
 ```
 
+## La suite Metal sur la carte
+
+`stela-amd-host --suite DIR` exécute les cas de calcul de la suite Metal sur ce périphérique, comme le fait l'exécuteur du Mac (`runner.m`). Il prend les bibliothèques que le Mac a compilées (`DIR/plan/lib`), et écrit ses résultats là où `cargo xtask gpu metal-suite check` les lit (`DIR/results/linux-gfx1201`). Il ne prend que les cas qui se résument à une bibliothèque, une fonction, des buffers, une grille et un threadgroup, soit 12 438 cas sur 14 162. Un cas déjà fait est sauté, ce qui permet de reprendre une exécution interrompue.
+
+```sh
+cargo xtask gpu metal-suite mac --host USER@MAC       # plan, bibliothèques et résultats de référence
+sg kvm -c "./target/release/stela-amd-host --suite .stela/metal-suite"
+cargo xtask gpu metal-suite check .stela/metal-suite/results/linux-gfx1201
+```
+
+Mesure du 16 novembre 2026, en 16 secondes :
+
+| | Cas |
+| --- | --- |
+| Identiques au Mac, dans ses tolérances | 11 727 calculs, plus 1 cas d'information sur le périphérique |
+| Écarts | 0 |
+| Non pris en charge : bibliothèques `*_runtime_*`, que le Mac compile à partir du MSL pendant le cas | 711 |
+| Pas encore exécutés : cas de rendu, de blit, de texture, de séquence, d'API… | 1 722 |
+
+Deux corrections ont été nécessaires pour arriver là :
+
+- **RADV ne savait pas compiler `sin`, `cos` et `tan`.** ACO refuse l'instruction NIR `fsin`, que RADV transforme d'habitude à la fin de son chemin SPIR-V (`nir_normalize_sin_cos`, `nir_lower_doubles`). Le NIR reçu de Stela ne passait pas par là : le patch `9001` lui applique ces deux passes. Au passage, l'erreur d'ACO faisait planter le processus au lieu de refuser le pipeline.
+- **Largeur SIMD.** Stela prenait `maxSubgroupSize` comme `threadExecutionWidth`. Ça donnait 32 sur NVIDIA, mais 64 sur RADV, qui compile en 32 ou en 64 fils. Or le code Metal écrit pour les GPU Apple compte sur des simdgroups de 32 : `simd_shuffle_rotate_*`, `simdgroup_barrier` et les fonctions `simd_*` divergeaient. Stela prend maintenant 32 dès que le pilote le permet (`capabilities::simd_width`).
+
 ## Ce qui reste pour J4
 
-- Faire tourner la suite Metal contre ce périphérique, sans macOS invité. Il faut pour cela un exécuteur du plan de la suite (`metal-suite plan`) côté Linux, qui traduise chaque cas en appels au `Device`.
+- Étendre l'exécuteur aux autres familles de cas : rendu (681), textures (380), séquences, blits, API, fonctions liées… Ensuite, compiler sur le Mac les bibliothèques `*_runtime_*`, pour les faire passer elles aussi.
 - Mesurer les alignements réels (lignes et décalages des surfaces linéaires) sur des images linéaires de RADV, pour remplacer les 256 octets estimés de `metal/amd.rs`.
