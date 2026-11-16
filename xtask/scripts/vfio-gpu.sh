@@ -132,7 +132,9 @@ restore() {
   local function console
   set +e
   for function in "${members[@]}"; do release "$function"; done
-  [[ -e /dev/vfio/$group ]] && chown root:root "/dev/vfio/$group"
+  for group in "${groups[@]}"; do
+    [[ -e /dev/vfio/$group ]] && chown root:root "/dev/vfio/$group"
+  done
   if ((nvidia)); then
     modprobe nvidia_drm
     modprobe nvidia_uvm
@@ -167,7 +169,13 @@ run() {
   local card
   card=$(gpu)
   mapfile -t members < <(functions "$card")
-  group=$(basename "$(readlink "$devices/$card/iommu_group")")
+  # The functions of a slot may sit in IOMMU groups of their own (a
+  # Radeon's HDMI audio does on some boards): QEMU opens each.
+  groups=()
+  local member
+  for member in "${members[@]}"; do
+    groups+=("$(basename "$(readlink "$devices/$member/iommu_group")")")
+  done
   stopped=0
   nvidia=0
   trap restore EXIT
@@ -187,7 +195,7 @@ run() {
   esac
   local function
   for function in "${members[@]}"; do bind "$function"; done
-  chown "$owner" "/dev/vfio/$group"
+  for group in "${groups[@]}"; do chown "$owner" "/dev/vfio/$group"; done
   ulimit -l unlimited
   local code=0
   # Stopping the service ends the command too: first let the card write no
