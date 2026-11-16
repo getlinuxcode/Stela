@@ -11,7 +11,8 @@ use stela_driver_gpu::metal::{
         BlendFactor, BlendOperation, ColorWriteMask, CompareFunction, CullMode, IndexType,
         LoadAction, MultisampleDepthResolveFilter, MultisampleStencilResolveFilter,
         PrimitiveTopologyClass, PrimitiveType, StencilOperation, StoreAction, StoreActionOptions,
-        TextureType, VisibilityResultType, Winding,
+        DepthClipMode, TextureType, TriangleFillMode, VisibilityResultMode, VisibilityResultType,
+        Winding,
     },
     command_buffer::{
         CommandBuffer,
@@ -47,8 +48,15 @@ const CASE: [&str; 15] = [
     "textures",
     "vertex",
 ];
-const RENDER: [&str; 24] = [
+const RENDER: [&str; 31] = [
     "alpha_to_coverage",
+    "alpha_to_one",
+    "depth_clip",
+    "fill",
+    "indirect",
+    "sample_positions",
+    "viewports",
+    "visibility",
     "base_vertex",
     "samples",
     "base_instance",
@@ -160,7 +168,13 @@ pub fn basic(case: &Value) -> bool {
         && (render["stencil"].is_null() || only(&render["stencil"], &STENCIL))
         && all(
             &render["draws"],
-            &["instance_count", "vertex_count", "vertex_start"],
+            &[
+                "instance_count",
+                "vertex_count",
+                "vertex_start",
+                "visibility_mode",
+                "visibility_offset",
+            ],
         )
         && all(&case["buffers"], &BUFFER)
         && stage_ok(&case["buffers"])
@@ -436,6 +450,7 @@ impl Runner<'_> {
         let samples = render["samples"].as_u64().unwrap_or(1);
         targets.raster_sample_count = samples;
         targets.alpha_to_coverage_enabled = render["alpha_to_coverage"] == true;
+        targets.alpha_to_one_enabled = render["alpha_to_one"] == true;
         let vertex_descriptor = if render["vertex_descriptor"].is_object() {
             Some(vertex_descriptor(&render["vertex_descriptor"])?)
         } else {
@@ -481,8 +496,21 @@ impl Runner<'_> {
             depth_resolve_filter: depth_filter,
             stencil_attachment,
             stencil_resolve_filter: stencil_filter,
-            visibility_result_buffer: None,
-            visibility_result_type: VisibilityResultType::Reset,
+            visibility_result_buffer: match render["visibility"]["buffer"].as_str() {
+                Some(name) => Some(
+                    held.buffers[*held
+                        .named
+                        .get(name)
+                        .ok_or(Error::Invalid("the visibility buffer is no buffer"))?]
+                    .id,
+                ),
+                None => None,
+            },
+            visibility_result_type: if render["visibility"]["type"] == "accumulate" {
+                VisibilityResultType::Accumulate
+            } else {
+                VisibilityResultType::Reset
+            },
             render_target_array_length: layers,
             render_target_width: size(0),
             render_target_height: size(1),
@@ -492,7 +520,12 @@ impl Runner<'_> {
                 0
             },
             tile_memory: Default::default(),
-            sample_positions: Vec::new(),
+            sample_positions: render["sample_positions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|p| [0, 1].map(|at| p[at].as_f64().unwrap_or(0.5) as f32))
+                .collect(),
             rasterization_rate_map: false,
             counter_samples: Vec::new(),
         };
@@ -524,6 +557,30 @@ impl Runner<'_> {
             Winding::CounterClockwise
         };
         commands.set_front_facing_winding(winding)?;
+        if render["depth_clip"] == "clamp" {
+            commands.set_depth_clip_mode(DepthClipMode::Clamp)?;
+        }
+        if render["fill"] == "lines" {
+            commands.set_triangle_fill_mode(TriangleFillMode::Lines)?;
+        }
+        if let Some(list) = render["viewports"].as_array() {
+            let viewports: Vec<Viewport> = list
+                .iter()
+                .take(16)
+                .map(|v| {
+                    let value = |at: usize| v[at].as_f64().unwrap_or(0.0);
+                    Viewport {
+                        origin_x: value(0),
+                        origin_y: value(1),
+                        width: value(2),
+                        height: value(3),
+                        znear: 0.0,
+                        zfar: 1.0,
+                    }
+                })
+                .collect();
+            commands.set_viewports(&viewports)?;
+        }
         if let Some(v) = render["viewport"].as_array() {
             let value = |at: usize| v.get(at).and_then(Value::as_f64).unwrap_or(0.0);
             commands.set_viewports(&[Viewport {
@@ -554,7 +611,56 @@ impl Runner<'_> {
             Some(draws) => draws.iter().filter_map(Value::as_object).collect(),
             None => vec![render.as_object().unwrap_or(&empty)],
         };
+        let buffer_named = |name: &str| -> Result<_> {
+            let at = *held
+                .named
+                .get(name)
+                .ok_or(Error::Invalid("a draw names no buffer"))?;
+            self.device.buffer(held.buffers[at].id)
+        };
+        if render["indirect"].is_object() {
+            let indirect = &render["indirect"];
+            let arguments = buffer_named(indirect["buffer"].as_str().unwrap_or_default())?;
+            let offset = indirect["offset"].as_u64().unwrap_or(0);
+            if let Some(name) = render["index_buffer"].as_str() {
+                let index_type = if render["index_type"] == "uint32" {
+                    IndexType::UInt32
+                } else {
+                    IndexType::UInt16
+                };
+                let indices = buffer_named(name)?;
+                commands.draw_indexed_primitives_indirect(
+                    &mut self.device.resolver(),
+                    primitive,
+                    index_type,
+                    indices,
+                    render["index_offset"].as_u64().unwrap_or(0),
+                    arguments,
+                    offset,
+                )?;
+            } else {
+                commands.draw_primitives_indirect(
+                    &mut self.device.resolver(),
+                    primitive,
+                    arguments,
+                    offset,
+                )?;
+            }
+            return commands.end_encoding(&mut self.device.resolver());
+        }
         for draw in draws {
+            // Each draw counted into its own visibility result.
+            if render["visibility"].is_object() {
+                let mode = draw
+                    .get("visibility_mode")
+                    .and_then(Value::as_str)
+                    .or(render["visibility"]["mode"].as_str())
+                    .unwrap_or("counting");
+                let mode = named(VisibilityResultMode::ALL, mode)
+                    .ok_or(Error::Unsupported("a visibility result mode"))?;
+                let offset = draw.get("visibility_offset").and_then(Value::as_u64).unwrap_or(0);
+                commands.set_visibility_result_mode(mode, offset)?;
+            }
             let count = |key: &str, default: u64| {
                 draw.get(key)
                     .and_then(Value::as_u64)

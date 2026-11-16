@@ -427,7 +427,11 @@ pub(crate) fn unmet(capabilities: &Capabilities, requires: &Value) -> Option<Str
                 c.supports_family(GpuFamily::Apple7) || c.supports_family(GpuFamily::Mac2)
             }
             // Counters, logging, amplification: this runner does not check them.
-            _ => false,
+            // As the Mac's runner: `samplesN`, whether textures take N samples.
+            _ => name
+                .strip_prefix("samples")
+                .and_then(|count| count.parse().ok())
+                .is_some_and(|count| c.supports_texture_sample_count(count)),
         };
         if !has {
             return Some(format!("feature {name}"));
@@ -544,7 +548,8 @@ impl Runner<'_> {
         for buffer in held.buffers {
             let _ = self.device.destroy_buffer(buffer.id);
         }
-        for (_, texture) in held.textures {
+        // Views before the textures they view.
+        for (_, texture) in held.textures.into_iter().rev() {
             let _ = self.device.destroy_texture(texture.id);
         }
         for (_, sampler, _) in held.samplers {

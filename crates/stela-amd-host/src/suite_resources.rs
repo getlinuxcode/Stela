@@ -8,8 +8,8 @@ use serde_json::Value;
 use stela_driver_gpu::metal::{
     abi::{
         BlitOption, CompareFunction, CpuCacheMode, HazardTrackingMode, ResourceOptions,
-        SamplerAddressMode, SamplerBorderColor, SamplerMinMagFilter, SamplerMipFilter, StorageMode,
-        SwizzleChannels, TextureType, TextureUsage,
+        SamplerAddressMode, SamplerBorderColor, SamplerMinMagFilter, SamplerMipFilter, SamplerReductionMode, StorageMode,
+        SwizzleChannels, TextureSwizzle, TextureType, TextureUsage,
     },
     binding::ResourceId,
     command_buffer::{
@@ -19,14 +19,18 @@ use stela_driver_gpu::metal::{
     device::{SamplerId, TextureId},
     error::{Error, Result},
     pixel_format::PixelFormat,
-    resource::TextureDescriptor,
+    resource::{TextureDescriptor, TextureViewDescriptor},
     sampler::SamplerDescriptor,
 };
 
 /// The texture fields this runner reproduces (`storage`, `row_padding` and
 /// `write_combined` change where the CPU reaches the texels, not what they
 /// hold, and this runner loads every texture through a blit).
-pub const TEXTURE: [&str; 15] = [
+pub const TEXTURE: [&str; 19] = [
+    "levels",
+    "slices",
+    "swizzle",
+    "view_of",
     "array",
     "samples",
     "stencil_file",
@@ -43,8 +47,9 @@ pub const TEXTURE: [&str; 15] = [
     "usage",
     "width",
 ];
-pub const SAMPLER: [&str; 14] = [
+pub const SAMPLER: [&str; 15] = [
     "address",
+    "reduction",
     "bind_lod",
     "anisotropy",
     "border",
@@ -161,6 +166,11 @@ impl Runner<'_> {
         let mut textures = Vec::new();
         let mut uploads = Vec::new();
         for spec in specs.as_array().into_iter().flatten() {
+            if spec["view_of"].is_string() {
+                let view = self.make_view(spec, &textures)?;
+                textures.push((spec["name"].as_str().unwrap_or_default().to_owned(), view));
+                continue;
+            }
             let format = spec["format"].as_str().unwrap_or_default();
             let pixel_format = named(PixelFormat::ALL, format).ok_or(Error::Unsupported(
                 "a pixel format this runner does not name",
@@ -340,6 +350,11 @@ impl Runner<'_> {
                 &text("border", "transparent_black"),
             )
             .ok_or(Error::Unsupported("a border color"))?,
+            reduction_mode: named(
+                SamplerReductionMode::ALL,
+                &text("reduction", "weighted_average"),
+            )
+            .ok_or(Error::Unsupported("a reduction mode"))?,
             normalized_coordinates: spec["normalized"].as_bool().unwrap_or(true),
             lod_min_clamp: spec["lod_min"].as_f64().unwrap_or(0.0) as f32,
             lod_max_clamp: spec["lod_max"].as_f64().map_or(f32::MAX, |lod| lod as f32),
@@ -361,5 +376,76 @@ fn whole(region: &Subresource) -> Region {
         level: region.level,
         origin: [0; 3],
         size: region.size,
+    }
+}
+
+impl Runner<'_> {
+    /// A view of an earlier texture of the case: another format, type,
+    /// mipmap and slice range or component swizzle over its memory.
+    fn make_view(&mut self, spec: &Value, textures: &[(String, Texture)]) -> Result<Texture> {
+        let source = spec["view_of"].as_str().unwrap_or_default();
+        let parent = textures
+            .iter()
+            .find(|(name, _)| name == source)
+            .map(|(_, texture)| texture)
+            .ok_or(Error::Invalid("a view names no texture"))?;
+        let p = &parent.descriptor;
+        let range = |key: &str, whole: u64| -> core::ops::Range<u64> {
+            let at = |i: usize, default: u64| spec[key][i].as_u64().unwrap_or(default);
+            let start = at(0, 0);
+            start..start + at(1, whole)
+        };
+        let cube = matches!(p.texture_type, TextureType::Cube);
+        let levels = range("levels", p.mipmap_level_count);
+        let slices = range("slices", if cube { 6 } else { p.array_length });
+        let mut swizzle = SwizzleChannels::IDENTITY;
+        let letters = spec["swizzle"].as_str().unwrap_or("rgba");
+        for (at, letter) in letters.chars().take(4).enumerate() {
+            swizzle.0[at] = match letter {
+                'r' => TextureSwizzle::Red,
+                'g' => TextureSwizzle::Green,
+                'b' => TextureSwizzle::Blue,
+                'a' => TextureSwizzle::Alpha,
+                '0' => TextureSwizzle::Zero,
+                '1' => TextureSwizzle::One,
+                _ => return Err(Error::Unsupported("a swizzle component")),
+            };
+        }
+        let pixel_format = match spec["format"].as_str() {
+            Some(format) => named(PixelFormat::ALL, format)
+                .ok_or(Error::Unsupported("a pixel format this runner does not name"))?,
+            None => p.pixel_format,
+        };
+        let texture_type = match spec["type"].as_str() {
+            Some(name) => texture_type(name)
+                .ok_or(Error::Unsupported("a texture type this runner does not make"))?,
+            None => p.texture_type,
+        };
+        let id = self.device.new_texture_view(
+            parent.id,
+            &TextureViewDescriptor {
+                pixel_format,
+                texture_type,
+                levels: levels.clone(),
+                slices: slices.clone(),
+                swizzle,
+                min_lod: 0.0,
+            },
+        )?;
+        // What the view spans, which reading it back follows.
+        let extent = |size: u64| (size >> levels.start).max(1);
+        let view_cube = matches!(texture_type, TextureType::Cube | TextureType::CubeArray);
+        let descriptor = TextureDescriptor {
+            texture_type,
+            pixel_format,
+            width: extent(p.width),
+            height: extent(p.height),
+            depth: extent(p.depth),
+            mipmap_level_count: levels.end - levels.start,
+            array_length: (slices.end - slices.start) / if view_cube { 6 } else { 1 },
+            swizzle,
+            ..*p
+        };
+        Ok(Texture { id, descriptor })
     }
 }
