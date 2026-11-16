@@ -67,7 +67,10 @@ VK_DRIVER_FILES=<un fichier ICD JSON pointant sur libstela_radv.so> ./target/rel
 
 ## La suite Metal sur la carte
 
-`stela-amd-host --suite DIR` exécute les cas de calcul de la suite Metal sur ce périphérique, comme le fait l'exécuteur du Mac (`runner.m`). Il prend les bibliothèques que le Mac a compilées (`DIR/plan/lib`), et écrit ses résultats là où `cargo xtask gpu metal-suite check` les lit (`DIR/results/linux-gfx1201`). Il ne prend que les cas qui se résument à une bibliothèque, une fonction, des buffers, une grille et un threadgroup, soit 12 438 cas sur 14 162. Un cas déjà fait est sauté, ce qui permet de reprendre une exécution interrompue.
+`stela-amd-host --suite DIR` exécute des cas de la suite Metal sur ce périphérique, comme l'exécuteur du Mac (`runner.m`). Il prend les bibliothèques que le Mac a compilées (`DIR/plan/lib`) et écrit ses résultats là où `cargo xtask gpu metal-suite check` les lit (`DIR/results/linux-gfx1201`). Un cas déjà fait est sauté, ce qui permet de reprendre une exécution interrompue. Il couvre deux familles :
+
+- les **calculs** qui se résument à une bibliothèque, une fonction, des buffers, une grille et un threadgroup (`suite.rs`) ;
+- les **rendus** en un seul tracé, sur des textures 2D chargées depuis leurs fichiers, avec des attachements de couleur qui chargent ou effacent, du mélange, des masques d'écriture et des buffers par étage (`suite_render.rs`).
 
 ```sh
 cargo xtask gpu metal-suite mac --host USER@MAC       # plan, bibliothèques et résultats de référence
@@ -75,21 +78,24 @@ sg kvm -c "./target/release/stela-amd-host --suite .stela/metal-suite"
 cargo xtask gpu metal-suite check .stela/metal-suite/results/linux-gfx1201
 ```
 
-Mesure du 16 novembre 2026, en 16 secondes :
+Mesure du 16 novembre 2026, en 19 secondes :
 
 | | Cas |
 | --- | --- |
-| Identiques au Mac, dans ses tolérances | 11 727 calculs, plus 1 cas d'information sur le périphérique |
-| Écarts | 0 |
-| Non pris en charge : bibliothèques `*_runtime_*`, que le Mac compile à partir du MSL pendant le cas | 711 |
-| Pas encore exécutés : cas de rendu, de blit, de texture, de séquence, d'API… | 1 722 |
+| Identiques au Mac, dans ses tolérances | 11 843 (11 727 calculs, 115 rendus, 1 cas d'information sur le périphérique) |
+| Écarts | 2 (cibles `rgb10a2unorm` et `bgr10a2unorm`, voir plus bas) |
+| Non pris en charge | 712 : 711 bibliothèques `*_runtime_*`, que le Mac compile à partir du MSL pendant le cas, et 1 cas de rendu avec des buffers d'un autre étage |
+| Pas encore exécutés | 1 602 : profondeur, stencil, descripteurs de sommets, multi-échantillonnage, échantillonneurs, textures non 2D, séquences, blits, API… |
 
-Deux corrections ont été nécessaires pour arriver là :
+Corrections faites en route :
 
 - **RADV ne savait pas compiler `sin`, `cos` et `tan`.** ACO refuse l'instruction NIR `fsin`, que RADV transforme d'habitude à la fin de son chemin SPIR-V (`nir_normalize_sin_cos`, `nir_lower_doubles`). Le NIR reçu de Stela ne passait pas par là : le patch `9001` lui applique ces deux passes. Au passage, l'erreur d'ACO faisait planter le processus au lieu de refuser le pipeline.
 - **Largeur SIMD.** Stela prenait `maxSubgroupSize` comme `threadExecutionWidth`. Ça donnait 32 sur NVIDIA, mais 64 sur RADV, qui compile en 32 ou en 64 fils. Or le code Metal écrit pour les GPU Apple compte sur des simdgroups de 32 : `simd_shuffle_rotate_*`, `simdgroup_barrier` et les fonctions `simd_*` divergeaient. Stela prend maintenant 32 dès que le pilote le permet (`capabilities::simd_width`).
+- **Position du fragment.** Le frontal AIR émettait `nir_load_frag_coord`, qu'ACO ne sait pas compiler : RADV demande la forme séparée (`xy`, `z`, `1/w`). Le frontal construit maintenant la position avec `nir_build_frag_coord`, qui suit la forme du pilote. Sur NVK, dont la forme est simple, le NIR reste le même.
+
+Écart connu : sur une cible `rgb10a2unorm` ou `bgr10a2unorm`, la carte donne parfois une unité de moins que le Mac (40 à 54 pixels sur 256). Pour ces formats, RADV fait sortir la couleur du shader en flottant 16 bits (`ac_choose_spi_color_formats`), et le code de RADV présente ce choix comme requis avec RB+. Le flottant 16 bits a juste assez de précision pour 10 bits, mais pas pour arrondir comme Apple.
 
 ## Ce qui reste pour J4
 
-- Étendre l'exécuteur aux autres familles de cas : rendu (681), textures (380), séquences, blits, API, fonctions liées… Ensuite, compiler sur le Mac les bibliothèques `*_runtime_*`, pour les faire passer elles aussi.
+- Étendre l'exécuteur au reste du rendu (profondeur, stencil, sommets, multi-échantillonnage, échantillonneurs), puis aux textures, séquences, blits et cas d'API. Ensuite, compiler sur le Mac les bibliothèques `*_runtime_*`, pour les faire passer elles aussi.
 - Mesurer les alignements réels (lignes et décalages des surfaces linéaires) sur des images linéaires de RADV, pour remplacer les 256 octets estimés de `metal/amd.rs`.

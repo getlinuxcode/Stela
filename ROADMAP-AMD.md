@@ -64,12 +64,12 @@ Fait sous Linux (Ubuntu 24.04, noyau 6.14, Mesa 25.2.8) :
 
 - J3 : les compilateurs de Stela sont construits avec la cible AMD et le frontal AIR (LLVM 23). La suite Metal tourne sur un Mac (M3 Pro, macOS 27.2.1) : 14 146 cas réussis, aucun échec. Les shaders de WindowServer, de CoreAnimation et de l'assistant de configuration compilent tous vers NIR pour gfx1201. Sur tout macOS, aucun refus n'est propre à AMD (`docs/amd/shaders.md`).
 
-- J4 : le vrai périphérique Metal de Stela tourne sur la 9070 XT, sous Linux, sur un RADV construit à partir du Mesa de Stela avec le compilateur Metal (`libstela_radv.so`). Le premier calcul et le premier rendu sont vérifiés, et toute la famille de calcul de la suite Metal passe à l'identique du Mac (`docs/amd/device.md`). Les corrections d'outillage de J3 sont proposées à upstream ([tylertms/Stela#160](https://github.com/tylertms/Stela/pull/160)).
+- J4 : le vrai périphérique Metal de Stela tourne sur la 9070 XT, sous Linux, sur un RADV construit à partir du Mesa de Stela avec le compilateur Metal (`libstela_radv.so`). Le premier calcul et le premier rendu sont vérifiés, et 11 843 cas de la suite Metal (tous les calculs exécutables et 115 rendus) passent à l'identique du Mac (`docs/amd/device.md`). Les corrections d'outillage de J3 sont proposées à upstream ([tylertms/Stela#160](https://github.com/tylertms/Stela/pull/160)).
 
 À faire ensuite, dans cet ordre :
 
 1. Suivre la revue des PR upstream [tylertms/Stela#158](https://github.com/tylertms/Stela/pull/158) (topologie, maintenant vérifiée sur le matériel) et [tylertms/Stela#160](https://github.com/tylertms/Stela/pull/160) (outillage).
-2. J4 : étendre l'exécuteur Linux de la suite (`stela-amd-host --suite`, qui passe déjà toute la famille de calcul) aux cas de rendu et de texture, puis au reste. Mesurer au passage les alignements des surfaces linéaires. Proposer à upstream la largeur SIMD de 32.
+2. J4 : étendre l'exécuteur Linux de la suite (`stela-amd-host --suite`) au reste du rendu (profondeur, stencil, sommets, multi-échantillonnage, échantillonneurs), puis aux textures et au reste. Mesurer au passage les alignements des surfaces linéaires. Proposer à upstream la largeur SIMD de 32 et `nir_build_frag_coord`.
 3. J3 : ouvrir à upstream des tickets pour les familles de refus du frontal AIR.
 4. J1, dernier point : le Ryzen 5 5600X n'a pas de puce graphique, et la 9070 XT est la seule sortie d'affichage. Avant le premier essai en VM, il faut ajouter une petite carte graphique pour l'écran de Linux, ou lancer l'essai par SSH et suivre la VM par VNC. L'utilisateur est maintenant dans le groupe `kvm`.
 
@@ -127,7 +127,8 @@ Détails et commandes dans `docs/amd/device.md`.
 - [x] Premier calcul : 65 536 additions de flottants sur le GPU, résultat vérifié.
 - [x] Premier rendu : un triangle dans une texture RGBA8, vérifié par son aire et la couleur de ses coins. Une bande de lignes, dessinée par le même pipeline sans classe de topologie, vérifie la PR #158 sur le matériel.
 - [x] Faire tourner la suite `metal-suite` directement contre le périphérique, sans macOS invité (`stela-amd-host --suite`) : 11 727 cas de calcul sur 11 727 identiques au Mac, aucun écart. Corrections en route : `sin` et `cos` dans RADV (patch `9001`), et largeur SIMD de 32 comme sur Apple (`capabilities::simd_width`).
-- [ ] Étendre l'exécuteur aux cas de rendu, de texture, de séquence et d'API (1 722 cas), et aux bibliothèques compilées à l'exécution (711 cas).
+- [x] Premiers cas de rendu de la suite : 115 identiques au Mac, et 2 écarts d'une unité sur les cibles 10 bits (sortie en flottant 16 bits imposée par RB+). Correction en route : le frontal AIR construit la position du fragment dans la forme du pilote (`nir_build_frag_coord`).
+- [ ] Étendre l'exécuteur au reste du rendu (profondeur, stencil, sommets, multi-échantillonnage, échantillonneurs), puis aux textures, séquences, blits et API (1 602 cas), et aux bibliothèques compilées à l'exécution (711 cas).
 - [ ] Mesurer les vrais alignements des surfaces linéaires sur RADV.
 
 **Terminé quand** la suite Metal passe sur la 9070 XT avec la même tolérance que sur NVIDIA.
