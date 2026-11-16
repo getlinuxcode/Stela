@@ -7,13 +7,22 @@ description = "Qualifies an AMD GPU and RADV for Stela's Metal device on a Linux
 repository.workspace = true
 rust-version.workspace = true
 publish = false
+build = "build.rs"
 
 [[bin]]
 name = "stela-amd-host"
 path = "src/main.rs"
 
+[features]
+# `--device`: links libstela_radv.so (RADV with the AIR compiler, built with
+# Meson's radv-host option) from STELA_RADV_DIR, by default
+# target/gpu/radv-host/amd/radv_host.
+radv-host = ["stela-driver-gpu/metal-linked", "dep:stela-contracts", "dep:libc"]
+
 [dependencies]
 stela-driver-gpu = { path = "../stela-driver-gpu", features = ["metal-vulkan"] }
+stela-contracts = { path = "../stela-contracts", default-features = false, optional = true }
+libc = { version = "0.2", optional = true }
 # The system's Vulkan loader, which reaches RADV (`libvulkan.so.1`).
 ash = { version = "0.38", default-features = false, features = ["loaded", "std"] }
 

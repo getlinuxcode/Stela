@@ -10,6 +10,10 @@
 //! for RADV is not built here; the report is what the driver and Stela's
 //! Metal layer allow.
 //!
+//! With `--device LIBRARY.metallib` (built with the `radv-host` feature, over
+//! `libstela_radv.so`), it then opens the real Metal device on the first
+//! admitted Radeon and runs its first work there ([`device`]).
+//!
 //! To force RADV when several drivers are installed:
 //! `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json`.
 //!
@@ -26,6 +30,8 @@ use stela_driver_gpu::metal::{
     vulkan::{MemoryHeapFlags, MemoryProperties},
 };
 
+#[cfg(feature = "radv-host")]
+mod device;
 mod sysfs;
 
 fn log(message: &str) {
@@ -69,22 +75,65 @@ fn main() -> ExitCode {
         println!("No Vulkan device. Is RADV installed (mesa-vulkan-drivers)?");
         return ExitCode::FAILURE;
     }
-    let mut qualified = false;
+    let library = match std::env::args().skip(1).collect::<Vec<_>>().as_slice() {
+        [] => None,
+        [flag, path] if flag == "--device" => match std::fs::read(path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) => {
+                eprintln!("cannot read {path}: {error}");
+                return ExitCode::FAILURE;
+            }
+        },
+        _ => {
+            eprintln!("usage: stela-amd-host [--device LIBRARY.metallib]");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut qualified = None;
     for device in &surveyed {
-        qualified |= report(device);
+        if let Some(gpu) = report(device) {
+            qualified.get_or_insert(gpu);
+        }
         println!();
     }
-    if qualified {
+    if let Some(gpu) = qualified {
         println!("RESULT: an AMD GPU qualifies for Stela's Metal device over RADV.");
-        ExitCode::SUCCESS
+        match library {
+            None => ExitCode::SUCCESS,
+            Some(library) => run_device(&gpu, library),
+        }
     } else {
         println!("RESULT: no AMD GPU qualifies yet; the lines above say why.");
         ExitCode::FAILURE
     }
 }
 
-/// Reports one device; true when it is an admitted, usable Radeon.
-fn report(device: &Surveyed) -> bool {
+/// Runs `--device` on the qualified GPU.
+#[cfg(feature = "radv-host")]
+fn run_device(gpu: &Gpu, library: Vec<u8>) -> ExitCode {
+    println!();
+    println!("Metal device on {}:", sysfs::address(gpu.pci));
+    match device::run(gpu, library) {
+        Ok(()) => {
+            println!("RESULT: Stela's Metal device ran its work on the GPU.");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            println!("  {error}");
+            println!("RESULT: the Metal device failed on the GPU.");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(not(feature = "radv-host"))]
+fn run_device(_: &Gpu, _: Vec<u8>) -> ExitCode {
+    eprintln!("--device needs the radv-host feature, which links libstela_radv.so");
+    ExitCode::FAILURE
+}
+
+/// Reports one device; the GPU when it is an admitted, usable Radeon.
+fn report(device: &Surveyed) -> Option<Gpu> {
     println!(
         "Vulkan device {}: {} (vendor {:04x}, device {:04x})",
         device.index, device.name, device.vendor_id, device.device_id
@@ -92,7 +141,7 @@ fn report(device: &Surveyed) -> bool {
     let probed = match &device.outcome {
         Outcome::NotAdmitted => {
             println!("  driver: not one Stela admits (RADV, NVK, ANV or Venus)");
-            return false;
+            return None;
         }
         Outcome::Probed(probed) => probed,
     };
@@ -108,17 +157,17 @@ fn report(device: &Surveyed) -> bool {
     let usable = requirements(probed);
     if device.vendor_id != amd::VENDOR_ID {
         println!("  not an AMD GPU: the AMD route does not apply");
-        return false;
+        return None;
     }
     let Some(pci) = identity.pci_bus else {
         println!("  the driver reports no PCI address (VK_EXT_pci_bus_info)");
-        return false;
+        return None;
     };
     let address = sysfs::address(pci);
     println!("  PCI: {address}");
     let Some(gc) = sysfs::graphics_core(&address).or_else(|| core_from_name(&device.name)) else {
         println!("  graphics core: unknown (no ip_discovery in sysfs, no GFX name from RADV)");
-        return false;
+        return None;
     };
     println!("  graphics core: GC {gc}");
     let attachment = Attachment {
@@ -135,7 +184,7 @@ fn report(device: &Surveyed) -> bool {
         Ok(chip) => chip,
         Err(refusal) => {
             println!("  admission: refused, {refusal:?}");
-            return false;
+            return None;
         }
     };
     println!(
@@ -143,7 +192,7 @@ fn report(device: &Surveyed) -> bool {
         chip.name, chip.die, chip.products, attachment.link.speed, attachment.link.width
     );
     capabilities(probed, chip, attachment);
-    usable
+    usable.then_some(gpu)
 }
 
 /// The device-local heap and how much of it the CPU reaches (Resizable BAR).

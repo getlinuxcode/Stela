@@ -2121,6 +2121,8 @@ name = "stela-amd-host"
 version = "0.4.2"
 dependencies = [
  "ash",
+ "libc",
+ "stela-contracts",
  "stela-driver-gpu",
 ]
 
