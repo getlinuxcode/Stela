@@ -68,7 +68,7 @@ Fait sous Linux (Ubuntu 24.04, noyau 6.14, Mesa 25.2.8) :
 
 À faire ensuite, dans cet ordre :
 
-1. J6 : fournir à amdgpu les services noyau qui lui manquent (3 sources en attente, 105 symboles importés), puis l'enregistrer au démarrage et l'essayer en VM avec la carte prêtée. Pendant les essais, l'agent travaille dans `tmux` (`xtask/scripts/amd-agent.sh`) : le bureau s'arrête, la session de travail non.
+1. J6 : fournir à amdgpu ses 10 derniers services noyau, en faire un vrai port lié (sur le modèle de `build/nouveau.rs`), puis l'enregistrer au démarrage et l'essayer en VM avec la carte prêtée. Pendant les essais, l'agent travaille dans `tmux` (`xtask/scripts/amd-agent.sh`) : le bureau s'arrête, la session de travail non.
 2. J1 : voir l'écran de démarrage nommer la carte, au premier essai de J6 en VM.
 
 ## Jalons
@@ -148,7 +148,7 @@ Détails et commandes dans `docs/amd/device.md`.
 Le plus gros chantier. Mise au point dans la VM avec la carte prêtée (voir « Développement en VM »), puis vérification sur la machine réelle avec le journal de démarrage sur la clé USB.
 
 - [x] Ajouter `drivers/gpu/drm/amd/` (amdgpu, display/DC, pm/swsmu, include) à `third_party/linux.sparse`, sans amdkfd (seulement ses en-têtes).
-- [ ] Compiler amdgpu sur `stela-linux` et écrire les patches de compatibilité nécessaires (`third_party/patches/amdgpu/`). Fait : Kbuild lu par GNU Make (`xtask/scripts/amd-kbuild.py`, 892 objets) et recensement (`amdgpu-census`) : 889 sources sur 892 compilent, 105 symboles importés restent à fournir (`docs/amd/amdgpu.md`).
+- [ ] Compiler amdgpu sur `stela-linux` et écrire les patches de compatibilité nécessaires (`third_party/patches/amdgpu/`). Fait : Kbuild lu par GNU Make (`xtask/scripts/amd-kbuild.py`, 892 objets) et recensement (`amdgpu-census`) : les 909 sources (amdgpu, amdxcp, assistants DRM, bibliothèque) compilent dans l'environnement, et 10 services noyau restent à fournir sur 105 (`docs/amd/amdgpu.md`, services du fork dans `src/amd/linux/`).
 - [ ] Créer `amdgpu.rs` (enregistrement du pilote au démarrage) et `amd.rs` (PCI, MMIO, DMA, pages), sur le modèle de `nouveau.rs` et `nvidia.rs`.
 - [ ] Firmwares : ajouter au provisionnement de `stela-cli` les fichiers `amdgpu/` de linux-firmware pour la Navi 48 (gc_12_0_1, psp_14_0_3, smu_14_0_3, sdma_7_0_1, dcn_4_0_1, noms à confirmer).
 - [ ] Démarrage côté Stela : réclamer les cartes AMD dans `engine/gpu.rs` et `engine/start.rs`, et donner les messages d'état AMD dans `gpu_status.rs`.

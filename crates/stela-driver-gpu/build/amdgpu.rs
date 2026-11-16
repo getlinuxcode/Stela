@@ -18,6 +18,32 @@ use stela_c_build::linux::Module;
 
 const AMD: &str = "../../third_party/linux/drivers/gpu/drm/amd";
 const KBUILD: &str = "build/amdgpu-kbuild.json";
+const AMD_LINUX: &str = "src/amd/linux";
+const LINUX: &str = "../../third_party/linux";
+/// The fork's own kernel services for amdgpu (`src/amd/linux`).
+const SERVICES: [&str; 2] = ["src/amd/linux/services", "src/amd/linux/pci"];
+/// What amdgpu selects that nouveau's port does not compile (Kconfig's
+/// DRM_BUDDY, DRM_SUBALLOC_HELPER, DRM_CLIENT, DRM_DISPLAY_DSC_HELPER,
+/// DRM_DISPLAY_HDCP_HELPER, DRM_PANEL_BACKLIGHT_QUIRKS), and amdgpu's
+/// companion module amdxcp, and the library code amdgpu reaches that
+/// nouveau does not, by path in Linux's tree.
+const SELECTED: [&str; 15] = [
+    "drivers/gpu/drm/drm_client_modeset",
+    "lib/kfifo",
+    "lib/bitmap-alloc",
+    "lib/math/gcd",
+    "mm/mempool",
+    "kernel/time/timeconv",
+    "kernel/locking/semaphore",
+    "drivers/gpu/buddy",
+    "drivers/gpu/drm/drm_buddy",
+    "drivers/gpu/drm/drm_suballoc",
+    "drivers/gpu/drm/drm_client",
+    "drivers/gpu/drm/drm_panel_backlight_quirks",
+    "drivers/gpu/drm/display/drm_dsc_helper",
+    "drivers/gpu/drm/display/drm_hdcp_helper",
+    "drivers/gpu/drm/amd/amdxcp/amdgpu_xcp_drv",
+];
 const MODULE: Module<'static> = Module {
     name: "amdgpu",
     file: "drivers/gpu/drm/amd/amdgpu/amdgpu",
@@ -43,6 +69,11 @@ pub fn census(linux: &Linux) {
         .environment
         .apply(&mut build, None, &native::drm_includes(&includes), Some(&MODULE));
     stela_c_build::linux_build::upstream_warnings(&mut build);
+    // The fork's answers to what Stela's configuration leaves out, before
+    // the environment's headers (`src/amd/linux`).
+    build
+        .flag(format!("-I{AMD_LINUX}/include"))
+        .flag(format!("-include{AMD_LINUX}/include/stela/amdgpu.h"));
     for flag in &defines {
         build.flag(flag);
     }
@@ -52,7 +83,12 @@ pub fn census(linux: &Linux) {
         .into_iter()
         .flatten()
         .filter_map(|o| o.as_str().map(str::to_owned))
+        .chain(SELECTED.iter().map(|path| format!("linux:{path}.o")))
+        .chain(SERVICES.iter().map(|path| format!("stela:{path}.o")))
         .collect();
+    for path in SERVICES {
+        println!("cargo:rerun-if-changed={path}.c");
+    }
     let failures = Mutex::new(BTreeMap::new());
     let compiled = Mutex::new(Vec::new());
     let out = PathBuf::from(env::var("OUT_DIR").unwrap()).join("amdgpu-objects");
@@ -64,12 +100,26 @@ pub fn census(linux: &Linux) {
                 (&compiler, &kbuild, &failures, &compiled, &out);
             scope.spawn(move || {
                 for object in chunk {
-                    let source = Path::new(AMD).join("amdgpu").join(object).with_extension("c");
+                    let source = if let Some(path) = object.strip_prefix("linux:") {
+                        Path::new(LINUX).join(path)
+                    } else if let Some(path) = object.strip_prefix("stela:") {
+                        PathBuf::from(path)
+                    } else {
+                        Path::new(AMD).join("amdgpu").join(object)
+                    }
+                    .with_extension("c");
                     let mut command: Command = compiler.to_command();
                     for flag in kbuild["object_flags"][object.as_str()].as_array().into_iter().flatten() {
                         command.arg(flag.as_str().unwrap_or_default());
                     }
-                    let object_path = out.join(object.replace("../", "").replace('/', "_"));
+                    let object_path =
+                        out.join(
+                        object
+                            .replace("linux:", "")
+                            .replace("stela:", "stela_")
+                            .replace("../", "")
+                            .replace('/', "_"),
+                    );
                     command
                         .arg("-c")
                         .arg("-ferror-limit=3")

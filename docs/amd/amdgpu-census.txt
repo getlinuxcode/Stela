@@ -1,115 +1,14 @@
-amdgpu census: 889 of 892 sources compile; 3 stop on these causes
+amdgpu census: 909 of 909 sources compile; 0 stop on these causes
 
-   1  'asm/fpu.h' file not found
-      e.g. ../display/amdgpu_dm/dc_fpu.o
-   1  call to undeclared function 'generic_handle_domain_irq'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
-      e.g. amdgpu_irq.o
-   1  call to undeclared function 'pfn_to_nid'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
-      e.g. gmc_v9_0.o
 
-105 kernel services amdgpu imports that the environment does not define:
-  __kfifo_alloc_node
-  __kfifo_free
-  __kfifo_in
-  __kfifo_in_r
-  __kfifo_out
-  __kfifo_out_peek
-  __printk_ratelimit
-  amdgpu_irq_add_domain
-  amdgpu_irq_add_id
-  amdgpu_irq_delegate
-  amdgpu_irq_disable_all
-  amdgpu_irq_dispatch
-  amdgpu_irq_enabled
-  amdgpu_irq_fini_hw
-  amdgpu_irq_fini_sw
-  amdgpu_irq_get
-  amdgpu_irq_gpu_reset_resume_helper
-  amdgpu_irq_init
-  amdgpu_irq_put
-  amdgpu_irq_remove_domain
-  amdgpu_irq_update
-  amdgpu_restore_msix
-  amdgpu_xcp_drm_dev_alloc
-  amdgpu_xcp_drm_dev_free
-  amdgpu_xcp_drv_release
-  backlight_device_register
-  backlight_device_unregister
-  bitmap_free
-  bitmap_zalloc
-  dc_assert_fp_enabled
-  dc_fpu_begin
-  dc_fpu_end
-  dc_is_fp_enabled
-  device_create_file
+10 kernel services amdgpu imports that the environment does not define:
   device_link_del
-  device_remove_file
-  devm_device_add_group
   devm_i2c_add_adapter
   devres_close_group
   devres_open_group
   devres_release_group
   disable_irq
-  dma_addressing_limited
-  dma_map_resource
-  dma_unmap_resource
-  down
-  drm_buddy_print
-  drm_client_init
-  drm_client_register
-  drm_client_release
-  drm_connector_attach_content_protection_property
-  drm_dsc_compute_rc_parameters
-  drm_dsc_pps_payload_pack
-  drm_get_panel_backlight_quirk
-  drm_hdcp_update_content_protection
-  drm_suballoc_free
-  drm_suballoc_manager_fini
-  drm_suballoc_manager_init
-  drm_suballoc_new
   emergency_restart
   enable_irq
-  gcd
-  gmc_v9_0_ip_block
-  gmc_v9_0_restore_registers
-  gpu_buddy_alloc_blocks
-  gpu_buddy_block_trim
-  gpu_buddy_fini
-  gpu_buddy_free_list
-  gpu_buddy_init
-  gpu_buddy_reset_clear
-  hwmon_device_register_with_groups
-  hwmon_device_unregister
-  kstrtouint_from_user
-  ktime_get_mono_fast_ns
-  ktime_get_raw
-  ktime_get_real_seconds
-  mempool_alloc_preallocated
-  mempool_create_node_noprof
-  mempool_destroy
-  mempool_free
-  mempool_kfree
-  mempool_kmalloc
-  node_id_to_phys_map
-  pci_bus_resource_n
-  pci_clear_master
-  pci_enable_atomic_ops_to_root
-  pci_find_ext_capability
-  pci_get_class
-  pci_load_saved_state
-  pci_rebar_bytes_to_size
-  pci_rebar_get_max_size
-  pci_reset_function
-  pci_resize_resource
-  pci_restore_msi_state
-  pci_store_saved_state
-  pcie_bandwidth_available
-  pcie_capability_read_word
-  pcie_get_mps
-  pcie_get_speed_cap
-  pcie_get_width_cap
-  soc15_ih_clientid_name
-  soc_v1_0_ih_clientid_name
+  platform_device_register_full
   sscanf
-  time64_to_tm
-  up

@@ -362,3 +362,11 @@
 /drivers/gpu/drm/amd/
 !/drivers/gpu/drm/amd/amdkfd/*
 /drivers/gpu/drm/amd/amdkfd/*.h
+# The buddy allocator amdgpu's VRAM manager uses (drm_buddy.c wraps it).
+/drivers/gpu/buddy.c
+# Library code amdgpu reaches that nouveau does not.
+/lib/kfifo.c
+/mm/mempool.c
+/lib/math/gcd.c
+/kernel/time/timeconv.c
+/kernel/locking/semaphore.c

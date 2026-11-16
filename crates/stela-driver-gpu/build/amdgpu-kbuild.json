@@ -907,6 +907,8 @@
   "-DCONFIG_DRM_AMD_DC=1",
   "-DCONFIG_DRM_AMD_DC_FP=1",
   "-Wno-gnu-variable-sized-type-not-at-end",
+  "-fms-extensions",
+  "-Wno-microsoft-anon-tag",
   "-Iinclude/asic_reg",
   "-Iinclude",
   "-Iamdgpu",

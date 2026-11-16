@@ -46,8 +46,9 @@ CONFIG = {
 # What the sources see of it: Stela's Kconfig header lacks amdgpu's options.
 DEFINES = ["-DCONFIG_DRM_AMDGPU=1", "-DCONFIG_DRM_AMD_DC=1", "-DCONFIG_DRM_AMD_DC_FP=1"]
 # Flags Linux's top Makefile gives every Clang build, which amdgpu needs:
-# its unions of flexible arrays (amdgv_sriovmsg.h) sit inside structures.
-LINUX_CLANG = ["-Wno-gnu-variable-sized-type-not-at-end"]
+# its unions of flexible arrays (amdgv_sriovmsg.h) sit inside structures,
+# and mempool's anonymous structures are Microsoft's extension.
+LINUX_CLANG = ["-Wno-gnu-variable-sized-type-not-at-end", "-fms-extensions", "-Wno-microsoft-anon-tag"]
 # arch/x86/Makefile's floating-point flags under Clang (GCC adds
 # -mhard-float), which the display core's floating-point units take.
 FPU = "-msse -msse2"
