@@ -1,6 +1,7 @@
 //! What amdgpu and the PCI core publish about a GPU in sysfs.
+use crate::chip::GcVersion;
 use std::{fs, path::Path};
-use stela_driver_gpu::metal::{amd::GcVersion, amd::PcieLink, vulkan::physical::PciBusInfo};
+use stela_driver_gpu::metal::{open::PcieLink, vulkan::physical::PciBusInfo};
 
 const DEVICES: &str = "/sys/bus/pci/devices";
 

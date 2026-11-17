@@ -1,9 +1,10 @@
 //! Buffers, textures and texture views: Metal descriptors validated against
 //! Metal's rules and the device, then lowered to Vulkan objects.
 //!
-//! Every texture uses one image layout for its whole life
-//! (`VK_KHR_unified_image_layouts`), so lowering never schedules layout
-//! transitions. Storage modes map to memory as a discrete Mac GPU realizes
+//! Every texture uses one image layout, `VK_IMAGE_LAYOUT_GENERAL`, for its
+//! whole life after its first barrier, so lowering never schedules layout
+//! transitions; `VK_KHR_unified_image_layouts`, where offered, promises
+//! that this layout costs nothing (`vulkan::backend::requirements`). Storage modes map to memory as a discrete Mac GPU realizes
 //! them: shared and managed resources live in host-visible memory, private
 //! resources in device-local memory. Memoryless textures live in device-local
 //! memory too: a pass may neither load nor store them, so no content outlives
@@ -190,9 +191,11 @@ pub enum CpuAccess {
     None,
     /// `vkCopyMemoryToImage` and `vkCopyImageToMemory`.
     HostImageCopy,
-    /// Metal's CPU copy of a managed texture, in a host-visible buffer:
-    /// CPU writes reach the image at the next commit, and
-    /// `synchronizeTexture` copies the image back.
+    /// A CPU copy in a host-visible buffer, which CPU writes reach the
+    /// image from at the next commit. A managed texture's is Metal's CPU
+    /// copy, which `synchronizeTexture` copies the image back into; a
+    /// shared texture's CPU reads copy the image out on the GPU
+    /// ([`Device::begin_read_back`](crate::metal::device::Device::begin_read_back)).
     Staged,
     /// The texture aliases a buffer's mapped rows.
     Linear,
@@ -298,12 +301,25 @@ pub fn texture(capabilities: &Capabilities, descriptor: &TextureDescriptor) -> R
             ));
         }
         StorageMode::Managed => CpuAccess::Staged,
-        // A staged copy only meets the GPU's writes at a synchronize.
-        StorageMode::Shared => {
+        // Metal copies no multisample texture's texels to or from the CPU
+        // (replaceRegion and getBytes take one sample), and no CPU call
+        // reaches a combined depth-stencil texture's: blits copy each
+        // aspect. Both are device images whose CPU copies answer
+        // Unsupported.
+        StorageMode::Shared
+            if descriptor.sample_count > 1 || matches!(description.kind, Kind::DepthStencil) =>
+        {
+            CpuAccess::None
+        }
+        StorageMode::Shared if !description.encoding().is_exact() => {
             return Err(super::error::Error::Unsupported(
-                "shared storage of a format without host image copy",
+                "shared storage of an extended-range format without host image copy",
             ));
         }
+        // Formats without host image copy, as NVK's depth and stencil
+        // formats: CPU writes reach the image at the next commit, and CPU
+        // reads copy the image out on the GPU, so each sees the GPU's.
+        StorageMode::Shared => CpuAccess::Staged,
     };
 
     let mut image = image_info(descriptor, description, realization, usage);

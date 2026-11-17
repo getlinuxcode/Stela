@@ -44,6 +44,7 @@ pub mod first_stop;
 pub mod gpu_requests;
 pub mod gpu_status;
 pub mod guarded_stacks;
+pub mod guest_bluetooth;
 pub mod guest_screen;
 pub mod guest_timeouts;
 pub mod handoff_records;
@@ -53,10 +54,12 @@ pub mod host_memory;
 #[cfg(target_arch = "x86_64")]
 pub mod host_performance;
 pub mod host_resources;
+pub mod host_samples;
 pub mod hpet;
 pub mod interrupt_image;
 pub mod ioapic;
 pub mod irq_context;
+pub mod linux_pump;
 pub mod loader_lines;
 pub mod log_sinks;
 pub mod machine_check;
@@ -70,6 +73,7 @@ pub mod native_profile;
 pub mod native_resources;
 #[cfg(target_arch = "x86_64")]
 pub mod nofault_read;
+pub mod opregion;
 pub mod options;
 pub mod page_window;
 pub mod paging_controls;
@@ -105,7 +109,9 @@ pub mod stop_record;
 pub mod storage;
 pub mod topology;
 pub mod tsc;
+pub mod uart;
 pub mod usb_legacy;
+pub mod vfct;
 #[cfg(target_arch = "x86_64")]
 pub mod vtd;
 pub mod work_status;

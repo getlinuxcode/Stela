@@ -1192,6 +1192,40 @@ fn flr_is_preferred_and_no_soft_reset_or_a_low_power_state_offers_no_reset() {
 }
 
 #[test]
+fn a_power_reset_linux_marks_ineffective_is_no_reset() {
+    // An AMD integrated GPU: a VGA function whose D3hot exit advertises a
+    // reset (No_Soft_Reset clear) and offers no FLR.
+    let mut gpu = resettable(0, 0);
+    (gpu.vendor, gpu.device, gpu.class) = (0x1002, 0x13c0, [3, 0, 0]);
+    assert!(!gpu.power_reset_resets());
+    assert_eq!(gpu.reset_method(), Ok(None));
+    assert_eq!(gpu.reset_with(|_| Ok(())), Ok(None));
+    assert_eq!(gpu.config.resets, 0);
+    // FLR is still that GPU's reset when it offers one.
+    let mut flr = resettable(1 << 28, 0);
+    (flr.vendor, flr.class) = (0x1002, [3, 0, 0]);
+    assert_eq!(flr.reset_method(), Ok(Some(ResetMethod::FunctionLevel)));
+    // The same vendor's other display class and audio function, and another
+    // vendor's VGA function, keep the transition as a reset.
+    for (vendor, device, class) in [
+        (0x1002, 0x13c0, [3, 0x80, 0]),
+        (0x1002, 0x1640, [4, 3, 0]),
+        (0x10de, 0x2c02, [3, 0, 0]),
+    ] {
+        let mut function = resettable(0, 0);
+        (function.vendor, function.device, function.class) = (vendor, device, class);
+        assert!(function.power_reset_resets());
+        assert_eq!(
+            function.reset_method(),
+            Ok(Some(ResetMethod::PowerManagement))
+        );
+    }
+    let mut switch = resettable(0, 0);
+    (switch.vendor, switch.device) = (0x15b3, 0xcf6c);
+    assert_eq!(switch.reset_method(), Ok(None));
+}
+
+#[test]
 fn an_unanswering_capability_is_an_error_not_a_reset() {
     let mut function = resettable(u32::MAX, 0);
     assert_eq!(

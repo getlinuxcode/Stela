@@ -215,7 +215,7 @@ fn caching() -> (AirCompiler, u64) {
         decode_astc_kernel: kernel,
         release,
         buffer_reads,
-        nir_options: NonNull::dangling(),
+        nir_options: [NonNull::dangling(); super::NIR_STAGES],
     };
     // SAFETY: the fake service never reads the options.
     let mut compiler = unsafe { AirCompiler::new(service, &nvk(&CHIPS[0], 8 << 30)) };
@@ -270,6 +270,40 @@ fn a_compilation_made_again_is_lent_from_the_cache() {
     compiler.release(third.code);
     // The service compiled twice and released nothing the cache holds.
     assert_eq!((calls().1, calls().2), (2, 0));
+}
+
+/// A key the service compiles a second time, its NIR evicted with no
+/// serialized copy to deserialize, counts as recompiled, in a turn or in a
+/// job; another shape does not.
+#[test]
+fn a_key_compiled_again_after_its_eviction_counts_as_recompiled() {
+    let (mut compiler, library) = caching();
+    let shapes = [32, 64].map(|width| Specialization {
+        workgroup_size: Some([width, 1, 1]),
+        ..Specialization::default()
+    });
+    let first = compiler.compile(library, "kernel", &shapes[0]).unwrap();
+    compiler.release(first.code);
+    compiler.end_call();
+    assert!(compiler.report().ends_with("recompiled=0"));
+    let other = compiler.compile(library, "kernel", &shapes[1]).unwrap();
+    compiler.release(other.code);
+    compiler.end_call();
+    assert!(compiler.report().ends_with("recompiled=0"));
+    // The cache loses both, as their evictions leave it.
+    compiler.nir = Some(NirCache::new(NIR_BUDGET));
+    let lock = compiler.compile_lock(core::hint::spin_loop);
+    compiler.set_deferring(true);
+    assert_eq!(
+        compiler.compile(library, "kernel", &shapes[0]),
+        Err(DEFERRED)
+    );
+    let job = compiler.take_deferred().unwrap();
+    compiler.end_call();
+    compiler.adopt(job.run_outside(&lock.hold(core::hint::spin_loop)));
+    let report = compiler.report();
+    assert!(report.contains("compiled=3 "), "{report}");
+    assert!(report.ends_with("recompiled=1"), "{report}");
 }
 
 #[test]
@@ -531,7 +565,7 @@ fn an_evicted_compilation_is_found_again_in_what_this_boot_serialized() {
     let recalled = compiler.serialized(&[2; 32]).unwrap();
     assert_eq!((&*recalled.0, recalled.1), (&[2u8, 2][..], true));
     assert!(compiler.serialized(&[3; 32]).is_none());
-    assert!(compiler.report().ends_with("recalled=0"));
+    assert!(compiler.report().ends_with("recalled=0 recompiled=0"));
 }
 
 #[test]
@@ -606,7 +640,7 @@ fn a_job_deserializes_this_boots_nir_and_compiles_what_does_not_deserialize() {
         report.contains("compiled=1 restored=0/0 deferred=2"),
         "{report}"
     );
-    assert!(report.ends_with("recalled=1"), "{report}");
+    assert!(report.ends_with("recalled=1 recompiled=0"), "{report}");
 }
 
 #[test]

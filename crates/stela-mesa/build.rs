@@ -3,11 +3,6 @@ use std::{env, path::PathBuf};
 
 fn main() {
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("set by Cargo"));
-    // AMD fork (J7): RADV's archives, with the LLVM NVK's build made.
-    if env::var_os("CARGO_FEATURE_RADV").is_some() {
-        radv(&manifest);
-        return;
-    }
     let directory = manifest.join("../../target/gpu/nvk");
     println!("cargo:rustc-link-search=native={}", directory.display());
     // Mesa links its Vulkan runtime and drivers whole: their entry points
@@ -46,39 +41,6 @@ fn main() {
             "../../third_party/mesa/src/nouveau/headers/nv_push_rs",
             "../../third_party/mesa/src/nouveau/nil",
             "../../third_party/mesa/src/nouveau/rust",
-            "../../rust-toolchain.toml",
-        ],
-    );
-}
-
-/// AMD fork (J7): RADV, ACO and NIR, as `cargo xtask gpu radv` archives
-/// them, and the Metal compiler's LLVM from NVK's build directory.
-fn radv(manifest: &std::path::Path) {
-    let radv = manifest.join("../../target/gpu/radv");
-    let nvk = manifest.join("../../target/gpu/nvk");
-    for (directory, name, kind, task) in [
-        (&radv, "stela-radv-vulkan", "static:+whole-archive", "radv"),
-        (&radv, "stela-radv", "static", "radv"),
-        (&nvk, "stela-llvm", "static", "nvk"),
-    ] {
-        let archive = directory.join(format!("lib{name}.a"));
-        assert!(
-            archive.is_file(),
-            "{} is missing: run `cargo xtask gpu {task}`",
-            archive.display()
-        );
-        println!("cargo:rustc-link-search=native={}", directory.display());
-        println!("cargo:rerun-if-changed={}", archive.display());
-        println!("cargo:rustc-link-lib={kind}={name}");
-    }
-    stela_fingerprint::emit(
-        "STELA_MESA_COMPILER_SHA256",
-        &[
-            ".",
-            "../../target/gpu/radv/libstela-radv.a",
-            "../../target/gpu/radv/libstela-radv-vulkan.a",
-            "../../third_party/mesa/src/amd/compiler",
-            "../../third_party/mesa/src/amd/common",
             "../../rust-toolchain.toml",
         ],
     );

@@ -40,6 +40,8 @@ stela_test_enter_block:
     mov rbp, [rdi + 8]
     mov r12, [rdi + 128]
     mov r13, [rdi + 136]
+    lea r11, [rsp - 8]
+    mov [rdi + {exit_rsp}], r11
     call rax
     mov [rdi + {sp}], rbx
     mov [rdi + 64], rsi
@@ -67,6 +69,7 @@ stela_test_enter_block:
     ud2
 "#,
     sp = const core::mem::offset_of!(GuestState, sp),
+    exit_rsp = const core::mem::offset_of!(GuestState, exit_rsp),
     nzcv = const core::mem::offset_of!(GuestState, nzcv),
     arm_shift = const flag_word::ARM_SHIFT,
     pack = const flag_word::PACK_MULTIPLIER,

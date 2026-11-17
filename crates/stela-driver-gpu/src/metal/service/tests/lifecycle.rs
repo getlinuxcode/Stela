@@ -146,6 +146,7 @@ fn shared_quiesce_uses_the_serialized_service_stack() {
             served: |_| {},
             wake: || {},
             bundle: |_| {},
+            job_waiting: || {},
         },
     );
     let connection = shared.connect().unwrap();
@@ -234,6 +235,37 @@ fn a_lost_device_reopens_while_an_empty_connection_stays_open() {
     assert!(!service.device().is_lost());
 }
 
+/// The lost device's backend, which the reopened device replaces: retired
+/// by default, kept unreleased for a driver whose release may wait without
+/// bound ([`Service::keep_lost_devices`], RADV's). Answers the devices still
+/// retiring and the references to the lost backend's probe.
+fn lost_backend_after_reopen(keep: bool) -> (usize, usize) {
+    let probe = alloc::sync::Arc::new(core::sync::atomic::AtomicBool::new(false));
+    let mut service = service().with_reopen(Box::new(|| Ok(device_on(MockBackend::new()))));
+    if keep {
+        service = service.keep_lost_devices();
+    }
+    service.device().backend().pipeline_gate = Some(probe.clone());
+    let connection = connect(&mut service);
+    service.device().mark_lost();
+    service.disconnect(connection).unwrap();
+    assert!(!service.device().is_lost());
+    (
+        service.retiring_devices(),
+        alloc::sync::Arc::strong_count(&probe),
+    )
+}
+
+#[test]
+fn a_reopened_device_retires_the_lost_one() {
+    assert_eq!(lost_backend_after_reopen(false).0, 1);
+}
+
+#[test]
+fn a_reopened_device_keeps_the_lost_one_when_asked() {
+    assert_eq!(lost_backend_after_reopen(true), (0, 2));
+}
+
 #[test]
 fn a_device_that_does_not_reopen_stays_lost() {
     let mut service = service().with_reopen(Box::new(|| Err(Error::OutOfMemory)));
@@ -243,4 +275,49 @@ fn a_device_that_does_not_reopen_stays_lost() {
     assert!(service.device().is_lost());
     assert_eq!(service.connect().unwrap_err().status, Status::DeviceLost);
     assert!(service.refused.pop().unwrap().contains("did not reopen"));
+}
+
+/// A replaced lost device is dropped only once its backend's idle steps
+/// end, one step per call that may recover, so no call holds its
+/// processor for the whole idle bound.
+#[test]
+fn a_replaced_device_retires_one_idle_step_per_call() {
+    use crate::metal::vulkan::backend::IdleStep;
+    let mut service = service().with_reopen(Box::new(|| Ok(device_on(MockBackend::new()))));
+    service.device().backend().idle_steps.extend([
+        IdleStep::Waiting,
+        IdleStep::Waiting,
+        IdleStep::Idle,
+    ]);
+    let first = connect(&mut service);
+    service.device().mark_lost();
+    service.disconnect(first).unwrap();
+    assert!(!service.device().is_lost());
+    assert_eq!(service.retiring_devices(), 1);
+    // Each later call steps once: waiting, waiting, then idle and dropped.
+    let next = connect(&mut service);
+    assert_eq!(service.retiring_devices(), 1);
+    service.disconnect(next).unwrap();
+    assert_eq!(service.retiring_devices(), 1);
+    connect(&mut service);
+    assert_eq!(service.retiring_devices(), 0);
+}
+
+/// An unproven idle step drops the lost device at once: its backend keeps
+/// what work may still use without waiting again.
+#[test]
+fn an_unproven_replaced_device_is_dropped_at_its_step() {
+    use crate::metal::vulkan::backend::IdleStep;
+    let mut service = service().with_reopen(Box::new(|| Ok(device_on(MockBackend::new()))));
+    service
+        .device()
+        .backend()
+        .idle_steps
+        .push_back(IdleStep::Unproven);
+    let first = connect(&mut service);
+    service.device().mark_lost();
+    service.disconnect(first).unwrap();
+    assert_eq!(service.retiring_devices(), 1);
+    connect(&mut service);
+    assert_eq!(service.retiring_devices(), 0);
 }

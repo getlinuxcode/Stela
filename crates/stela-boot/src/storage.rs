@@ -277,8 +277,30 @@ fn report_census(functions: &[crate::pci_io::FunctionObservation]) {
         .filter(|identity| identity.vendor == NVIDIA && identity.class[0] == 0x03)
         .map(|identity| identity.device)
         .collect();
-    let notice = gpu_notice(&nvidia);
-    if nvidia.is_empty() {
+    // An image that links another vendor's Vulkan driver drives that
+    // vendor's display controllers itself: one of them is the GPU macOS
+    // starts with, so the NVIDIA-only notice does not apply.
+    let driven = functions
+        .iter()
+        .map(crate::pci_io::FunctionObservation::identity)
+        .filter(|identity| identity.vendor != NVIDIA && identity.class[0] == 0x03)
+        .find_map(|identity| {
+            let vendor = stela_drivers::gpu::Vendor::from_pci(identity.vendor);
+            stela_drivers::gpu::stack::STACKS
+                .iter()
+                .find(|stack| stack.vendor == vendor && stack.draws())
+        });
+    let notice = if driven.is_some() {
+        0
+    } else {
+        gpu_notice(&nvidia)
+    };
+    if let Some(stack) = driven {
+        output::arguments(format_args!(
+            "HOST GPU: a {:?} display controller, which this image drives with {}\n",
+            stack.vendor, stack.kernel.driver
+        ));
+    } else if nvidia.is_empty() {
         output::arguments(format_args!(
             "UNSUPPORTED host GPU: no NVIDIA display controller among {} PCI functions\n",
             functions.len()
@@ -497,6 +519,9 @@ impl Prepared {
         }
         for (location, error) in &devices.platform_failures {
             output::arguments(format_args!("PLATFORM FAILED {location}: {error}\n"));
+        }
+        for (location, why) in &devices.platform_unsupported {
+            output::arguments(format_args!("PLATFORM UNSUPPORTED {location}: {why}\n"));
         }
         for (address, warning) in &devices.warnings {
             output::arguments(format_args!("HOST WARNING pci={address}: {warning}\n"));

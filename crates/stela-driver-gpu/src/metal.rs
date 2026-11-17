@@ -3,9 +3,8 @@
 //! The guest's unchanged Metal framework reaches this device through the
 //! frontend; every Metal object and command lowers here to the internal
 //! [`vulkan`] boundary, which the vendor's Mesa driver executes (NVK for the
-//! [`nvidia`] route, RADV for the [`amd`] route once amdgpu is ported).
-//! Capabilities derive from the Vulkan device, the AIR compiler and this
-//! implementation together ([`capabilities`]).
+//! [`nvidia`] route). Capabilities derive from the Vulkan device, the AIR
+//! compiler and this implementation together ([`capabilities`]).
 //!
 //! [`library`] parses Metal libraries and exposes their original AIR and
 //! metadata, which [`compiler`] lowers through the AIR compiler service. AGX machine code archives are a different input and are not
@@ -14,6 +13,7 @@
 mod macros;
 
 pub mod abi;
+#[cfg(feature = "amdgpu-port")]
 pub mod amd;
 pub mod argument;
 pub mod binding;
@@ -26,11 +26,14 @@ pub mod error;
 pub mod hazard;
 pub mod heap;
 pub mod indirect;
+#[cfg(feature = "xe-port")]
+pub mod intel;
 pub mod kms;
 pub mod library;
 #[cfg(feature = "metal-vulkan")]
 pub mod native;
 pub mod nvidia;
+pub mod open;
 pub mod pass;
 pub mod pipeline;
 pub mod pixel_format;

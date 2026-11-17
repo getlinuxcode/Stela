@@ -74,6 +74,24 @@ impl Processor {
     }
 }
 
+/// Mark every processor healthy when the firmware's health bits report
+/// nothing, and say whether they did. The bootstrap processor runs this
+/// code, so firmware that marks it unhealthy marks processors without
+/// reporting a self-test; Linux reads no health bit at all. An AP that does
+/// not work is still left out when it cannot be observed
+/// ([`select_observed`]).
+pub fn ignore_unreported_health(processors: &mut [Processor]) -> bool {
+    let unreported = processors.iter().any(|processor| {
+        processor.flags & (BSP | ENABLED) == BSP | ENABLED && processor.flags & HEALTHY == 0
+    });
+    if unreported {
+        for processor in processors.iter_mut() {
+            processor.flags |= HEALTHY;
+        }
+    }
+    unreported
+}
+
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Cpuid {

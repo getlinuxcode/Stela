@@ -153,8 +153,13 @@ static bool fill(struct stela_linux_mapping *mapping, unsigned long from, unsign
 {
 	for (unsigned long at = from; at < to;) {
 		WRITE_ONCE(mapping->filled, at);
-		if (!stela_linux_refault(mapping, at, true))
+		if (!stela_linux_refault(mapping, at, true)) {
+			/* The client sees only EFAULT: say which page. */
+			pr_warn("client mapping of %lu bytes: page %lu did not fault in\n",
+				mapping->vma.vm_end - mapping->vma.vm_start,
+				(at - mapping->vma.vm_start) >> PAGE_SHIFT);
 			return false;
+		}
 		at = max(at + PAGE_SIZE, READ_ONCE(mapping->filled));
 	}
 	return true;
@@ -415,6 +420,11 @@ bool stela_linux_refault(struct stela_linux_mapping *mapping, unsigned long addr
 	vm_fault_t result = stela_linux_fault(mapping, address, write);
 
 	return (result & VM_FAULT_NOPAGE) && !(result & (VM_FAULT_ERROR | VM_FAULT_RETRY));
+}
+
+vm_fault_t vmf_insert_pfn(struct vm_area_struct *vma, unsigned long addr, unsigned long pfn)
+{
+	return vmf_insert_pfn_prot(vma, addr, pfn, vma->vm_page_prot);
 }
 
 vm_fault_t vmf_insert_pfn_prot(struct vm_area_struct *vma, unsigned long addr, unsigned long pfn,

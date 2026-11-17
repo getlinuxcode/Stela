@@ -3,6 +3,7 @@
  * needs: adapters, transfers with Linux's retries, and unbound clients. */
 #include <linux/err.h>
 #include <linux/i2c.h>
+#include <stela/device.h>
 #include <linux/jiffies.h>
 #include <linux/string.h>
 #include <stela/test.h>
@@ -30,44 +31,6 @@ static const struct i2c_algorithm algorithm = {.xfer = transfer, .functionality 
 
 static struct i2c_adapter adapter = {.algo = &algorithm, .retries = 1, .name = "test"};
 
-/* amdgpu's SMU bus: a write then a read to one address, short messages. */
-static const struct i2c_adapter_quirks quirks = {
-	.flags = I2C_AQ_COMB | I2C_AQ_COMB_SAME_ADDR | I2C_AQ_NO_ZERO_LEN,
-	.max_read_len = 8,
-	.max_write_len = 8,
-	.max_comb_1st_msg_len = 2,
-	.max_comb_2nd_msg_len = 6,
-};
-static struct i2c_adapter limited = {.algo = &algorithm, .quirks = &quirks, .name = "limited"};
-
-/* The core refuses what an adapter's quirks rule out before its transfer. */
-static void quirks_test(void)
-{
-	u8 bytes[10] = {};
-	struct i2c_msg msgs[3] = {
-		{.addr = 0x50, .len = 2, .buf = bytes},
-		{.addr = 0x50, .flags = I2C_M_RD, .len = 6, .buf = bytes},
-		{.addr = 0x50, .len = 1, .buf = bytes},
-	};
-
-	assert(!i2c_add_adapter(&limited));
-	transfers = 0;
-	results[0] = 2;
-	assert(i2c_transfer(&limited, msgs, 2) == 2 && transfers == 1);
-	transfers = 0;
-	msgs[1].addr = 0x51;
-	assert(i2c_transfer(&limited, msgs, 2) == -EOPNOTSUPP);
-	msgs[1].addr = 0x50;
-	msgs[1].len = 7;
-	assert(i2c_transfer(&limited, msgs, 2) == -EOPNOTSUPP);
-	assert(i2c_transfer(&limited, msgs, 3) == -EOPNOTSUPP);
-	msgs[2].len = 0;
-	assert(i2c_transfer(&limited, &msgs[2], 1) == -EOPNOTSUPP);
-	msgs[2].len = 9;
-	assert(i2c_transfer(&limited, &msgs[2], 1) == -EOPNOTSUPP && !transfers);
-	i2c_del_adapter(&limited);
-}
-
 void stela_linux_i2c_test(void)
 {
 	assert(!i2c_add_adapter(&adapter) && adapter.timeout == HZ);
@@ -92,11 +55,34 @@ void stela_linux_i2c_test(void)
 	struct i2c_client *client = i2c_new_client_device(&adapter, &info);
 	assert(!IS_ERR(client) && client->addr == 0x48 && !client->dev.driver);
 	assert(!strcmp(client->name, "sensor") && client->adapter == &adapter);
+	/* A client and an adapter are each known by their device type. */
+	assert(i2c_verify_client(&client->dev) == client && !i2c_verify_client(&adapter.dev));
+	assert(i2c_verify_adapter(&adapter.dev) == &adapter && !i2c_verify_adapter(&client->dev));
+	/* One message to the client: its bytes moved, or the transfer's error. */
+	char bytes[3] = {0};
+	transfers = 0;
+	results[0] = 1;
+	assert(i2c_master_send(client, bytes, 3) == 3 && transfers == 1);
+	transfers = 0;
+	results[0] = -EIO;
+	assert(i2c_master_recv(client, bytes, 3) == -EIO && transfers == 1);
+	transfers = 0;
 	i2c_unregister_device(client);
 	i2c_unregister_device(ERR_PTR(-ENODEV));
 	info.addr = 0x80;
 	assert(IS_ERR(i2c_new_client_device(&adapter, &info)));
 
 	i2c_del_adapter(&adapter);
-	quirks_test();
+
+	/* A managed adapter goes when its device's driver detaches. */
+	static struct device parent;
+	static struct i2c_adapter managed;
+
+	managed.algo = adapter.algo;
+	strscpy(managed.name, "managed", sizeof(managed.name));
+	device_initialize(&parent);
+	assert(!devm_i2c_add_adapter(&parent, &managed));
+	assert(kref_read(&managed.dev.kobj.kref) == 1);
+	stela_linux_devres_release(&parent);
+	assert(!kref_read(&managed.dev.kobj.kref));
 }

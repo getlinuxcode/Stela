@@ -21,7 +21,6 @@ use stela_driver_gpu::metal::{
         PrimitiveType, ResourceOptions, StorageMode, StoreAction, StoreActionOptions,
         SwizzleChannels, TextureType, TextureUsage, VisibilityResultType,
     },
-    amd::open::{Gpu, reopen},
     capabilities::Size,
     command_buffer::blit::{BlitTexture, BufferLayout, Region},
     compiler::{AirCompiler, Service},
@@ -34,6 +33,7 @@ use stela_driver_gpu::metal::{
     },
     error::{Error, Result},
     native::{ExportedMemory, Loader, MemoryExporter, NativeBackend, vk},
+    open::{Gpu, reopen},
     pipeline::{ColorAttachmentDescriptor, MAX_COLOR_ATTACHMENTS, RenderTargets},
     pixel_format::PixelFormat,
     resource::TextureDescriptor,
@@ -69,12 +69,16 @@ pub fn run(gpu: &Gpu, work: Work) -> core::result::Result<(), String> {
         log: super::log,
         submit_thread: None,
         refusals: None,
+        keep_lost: false,
         relax: super::relax,
     };
     let compiler = |physical| {
         // SAFETY: RADV's own physical device, whose options it keeps.
         let options = unsafe { stela_radv_nir_options(physical) };
-        Service::linked(NonNull::new(options.cast_mut()).expect("RADV has NIR options"))
+        let options = NonNull::new(options.cast_mut()).expect("RADV has NIR options");
+        // One set for every stage, as libstela_radv's options are the
+        // compute stage's, which the suite's stages share.
+        Service::linked(core::array::from_fn(|_| options))
     };
     // SAFETY: the loader and the compiler are libstela_radv's, which this
     // binary links, so they outlive the device.

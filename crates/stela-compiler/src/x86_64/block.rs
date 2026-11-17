@@ -20,17 +20,20 @@ pub(super) fn exit_kind(code: &mut Code, kind: ExitKind) {
     exit_kind_with(&mut code.asm(), kind);
 }
 
-/// `mov edx,word; ret`: the exit to the target in RAX, unpadded
+/// `mov edx,word`, the patch point's `jmp` to the return after it, and the
+/// return to the engine: the exit to the target in RAX, unpadded
 /// (`chain::dynamic_exit`).
 pub(super) fn exit_kind_with(asm: &mut Asm, word: impl Into<ExitWord>) {
+    use super::chain::{DYNAMIC_EXIT_BYTES, EXIT_RETURN_BYTES, PATCH_BYTES, RET_ROOM};
     // An exit hands the engine the state block, which must be current.
     asm.refuse_dirty_homes("a block exit");
     // MOV EDX zero-extends to the ABI's u64.
     asm.mov_imm32(Gpr::Rdx, word.into().encoded());
-    asm.ret();
-    // The rest of the room a jump at the RET takes, and of the pad that
-    // makes the RET patchable where the code lands (`chain::dynamic_patch`).
-    for _ in 6..super::chain::DYNAMIC_EXIT_BYTES {
+    asm.fixed(&RET_ROOM);
+    super::chain::exit_return(asm);
+    // The pad that makes the patch point patchable where the code lands
+    // (`chain::dynamic_patch`).
+    for _ in 5 + PATCH_BYTES + EXIT_RETURN_BYTES..DYNAMIC_EXIT_BYTES {
         asm.int3();
     }
 }
@@ -216,8 +219,18 @@ pub(crate) fn emit_system_mode(
     (block, recovery)
 }
 
-/// [`emit_system_mode`], and whether the block runs its iterations inside
-/// itself ([`SelfLoop`]).
+/// What a block's emission leaves beside its code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Shape {
+    /// The block runs its iterations inside itself ([`SelfLoop`]).
+    pub self_loop: bool,
+    /// The code offsets of its cold code, the slow paths moved out of line
+    /// and the paths placed behind the jumps over them, start to end; `(0,
+    /// 0)` with none (`CompiledBlock::cold`).
+    pub cold: (u32, u32),
+}
+
+/// [`emit_system_mode`], and the block's [`Shape`].
 pub(crate) fn emit_system_mode_looped(
     instructions: &[Instruction],
     terminal: Option<&(GuestAddress, Terminator)>,
@@ -225,7 +238,7 @@ pub(crate) fn emit_system_mode_looped(
     target: crate::TargetCpu,
     checks: super::MemoryChecks,
     native: super::NativeSystem,
-) -> (NativeBlock, Vec<crate::block::FaultRecovery>, bool) {
+) -> (NativeBlock, Vec<crate::block::FaultRecovery>, Shape) {
     // Guest registers stay in host registers (`x86_64::pinned`), which the
     // engine's fault settlement reads. Pure spans can temporarily keep other
     // values in scratch registers; the ordinary regions use the reserved
@@ -488,7 +501,7 @@ fn emit_selected(
     regions: RegionPolicy,
     checks: super::MemoryChecks,
     native: super::NativeSystem,
-) -> (NativeBlock, Vec<crate::block::FaultRecovery>, bool) {
+) -> (NativeBlock, Vec<crate::block::FaultRecovery>, Shape) {
     let RegionPolicy {
         optimize: optimize_regions,
         fault_table,
@@ -747,12 +760,12 @@ fn emit_selected(
                     // A join lands here from a point that stored them all.
                     code.settle_vectors();
                 }
-                // A fused group addresses the state itself.
+                // A fused group reaches V as its hash rounds do.
                 let class_at = |at: usize| {
                     if fuse_simd
                         && super::simd::sha256::HashGroup::recognize(&instructions[at..]).is_some()
                     {
-                        VectorUse::Settle
+                        super::simd::sha256::group_vector_use(target)
                     } else {
                         vector_use(&instructions[at].operation, target)
                     }
@@ -1480,6 +1493,8 @@ fn emit_selected(
     // terminal's branch: only the jumps over the moved code and the paths
     // below come between, and moved code returns into the body.
     let flags_live = after.rax == super::Rax::Nzcv && code.ends_with(&nzcv_store(code.is_pinned()));
+    // The cold code below starts after the first jump over it.
+    let cold_start = code.len() + super::chain::JUMP_BYTES;
     out_of_line.place(code);
     // Before the terminal, whose direct exits end the code.
     if !pointer_paths.is_empty()
@@ -1506,6 +1521,10 @@ fn emit_selected(
         }
         code.asm().bind(over);
     }
+    let cold = match code.len() > cold_start {
+        true => (cold_start as u32, code.len() as u32),
+        false => (0, 0),
+    };
     if let Some(fast) = prefix_sum {
         code.asm().bind(fast);
         // All fast-path state is settled. The scalar source rows describe
@@ -1666,7 +1685,11 @@ fn emit_selected(
             fault_recovery,
         );
     }
-    (block.into_native(), fault_recovery, self_loop.is_some())
+    let shape = Shape {
+        self_loop: self_loop.is_some(),
+        cold,
+    };
+    (block.into_native(), fault_recovery, shape)
 }
 
 /// The zero test can consume the adjacent frame ALU result's host flags.
@@ -2281,7 +2304,13 @@ pub(crate) fn successor_exits(
         .sum();
     // Check failures end the code, after every exit's RET.
     let mut end = super::chain::without_failures(&native.x86_64_code).len() - side_bytes;
-    let mut exits = terminal_exits(&native.x86_64_code[..end], terminal, fallthrough, linked);
+    let mut exits = terminal_exits(
+        &native.x86_64_code[..end],
+        terminal,
+        fallthrough,
+        linked,
+        native.source_map.len(),
+    );
     for (run, target) in branches {
         let word = side_exit(native.source_map.len() - run);
         let offset = end + slot(target);
@@ -2296,8 +2325,50 @@ pub(crate) fn successor_exits(
     exits
 }
 
-/// The direct exits that end `code`.
+/// The direct exits that end `code`, a block's of `ran` instructions: a
+/// paired call's ([`paired_exit`]) end with its continuation's.
 fn terminal_exits(
+    code: &[u8],
+    terminal: Option<&(GuestAddress, Terminator)>,
+    fallthrough: GuestAddress,
+    linked: Option<u64>,
+    ran: usize,
+) -> Vec<super::chain::DirectExit> {
+    use super::chain::{DIRECT_EXIT_BYTES, DirectExit, is_direct_exit, link_slot};
+    let paired = linked.is_some()
+        && matches!(
+            terminal.map(|(_, terminal)| terminal),
+            Some(Terminator::DirectCall(_))
+                | Some(Terminator::Register {
+                    kind: ExitKind::Call,
+                    ..
+                })
+        );
+    if !paired {
+        return terminal_exits_before(code, terminal, fallthrough, linked);
+    }
+    let word = continuation_word(ran);
+    let Some(offset) = code.len().checked_sub(DIRECT_EXIT_BYTES) else {
+        return vec![];
+    };
+    if !is_direct_exit(&code[offset..], fallthrough, word) {
+        return vec![];
+    }
+    let Some(before) = offset.checked_sub(link_slot(linked, fallthrough, word.kind)) else {
+        return vec![];
+    };
+    let mut exits = terminal_exits_before(&code[..before], terminal, fallthrough, linked);
+    exits.push(DirectExit {
+        offset,
+        target: fallthrough,
+        kind: word.kind,
+        skipped: word.skipped,
+    });
+    exits
+}
+
+/// [`terminal_exits`] up to a paired call's continuation.
+fn terminal_exits_before(
     code: &[u8],
     terminal: Option<&(GuestAddress, Terminator)>,
     fallthrough: GuestAddress,
@@ -2446,7 +2517,10 @@ fn emit_terminal(
             Terminator::DirectCall(target) => {
                 super::guest_immediate(code, fallthrough);
                 super::store(code, Register::X(30));
-                direct_exit(code, *target, ExitKind::Call);
+                let ran = source_map.len();
+                paired_exit(code, fallthrough, ran, |asm| {
+                    direct_exit_with(asm, *target, ExitKind::Call)
+                });
             }
             Terminator::Register { source, kind } => {
                 load_unless_held(code, *source, rax);
@@ -2456,8 +2530,15 @@ fn emit_terminal(
                     super::guest_immediate(code, fallthrough);
                     super::store(code, Register::X(30));
                     code.asm().mov(Size::Qword, Gpr::Rax, Gpr::Rcx);
+                    let ran = source_map.len();
+                    paired_exit(code, fallthrough, ran, |asm| {
+                        exit_kind_with(asm, ExitKind::Call)
+                    });
+                } else {
+                    // A return's frame check is its lookup tail's
+                    // (`chain::paired_tail`).
+                    exit_kind(code, *kind);
                 }
-                exit_kind(code, *kind);
             }
             Terminator::Branch(operation) => match *operation {
                 Operation::Branch { target } => direct_exit(code, target, ExitKind::Direct),
@@ -2473,6 +2554,37 @@ fn emit_terminal(
         }
     } else {
         direct_exit(code, fallthrough, ExitKind::Fallthrough);
+    }
+}
+
+/// The exit of a call to a guest return address of `return_address` from a
+/// block of `ran` instructions, which `exit` emits: in code that chains,
+/// after a paired frame and a host call of it (`chain::paired_call`), then
+/// the frame's continuation, an exit to `return_address` that leaves all
+/// `ran` unrun, as the call's exit counted them. Elsewhere `exit` alone.
+fn paired_exit(
+    code: &mut Code,
+    return_address: GuestAddress,
+    ran: usize,
+    exit: impl FnOnce(&mut Asm),
+) {
+    let mut asm = code.asm();
+    if asm.linked_block().is_none() {
+        exit(&mut asm);
+        return;
+    }
+    let continuation = super::chain::paired_call(&mut asm, return_address);
+    exit(&mut asm);
+    asm.bind(continuation);
+    direct_exit_with(&mut asm, return_address, continuation_word(ran));
+}
+
+/// The word of a paired call's continuation from a block of `ran`
+/// instructions: every one of them left unrun ([`paired_exit`]).
+fn continuation_word(ran: usize) -> ExitWord {
+    ExitWord {
+        kind: ExitKind::Fallthrough,
+        skipped: u16::try_from(ran).expect("bounded block instructions"),
     }
 }
 

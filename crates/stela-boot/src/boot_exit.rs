@@ -105,8 +105,10 @@ impl Firmware for Services {
 /// closed (`output::leave_boot_services`).
 pub(crate) unsafe fn exit(buffer: Buffer) -> MemoryMapRef<'static> {
     let Buffer(buffer) = buffer;
+    let calling = output::now();
     let Exited { map, attempts } = boot_exit::exit(&mut Services, buffer)
         .unwrap_or_else(|refused| output::fatal(format_args!("{refused}")));
+    let millis = output::millis_since(calling);
     let meta = MemoryMapMeta {
         map_size: map.bytes,
         desc_size: map.descriptor_bytes,
@@ -115,7 +117,8 @@ pub(crate) unsafe fn exit(buffer: Buffer) -> MemoryMapRef<'static> {
     };
     let capacity = buffer.len() / map.descriptor_bytes;
     output::arguments(format_args!(
-        "FIRMWARE boot services ended at try {attempts} of {}, map {} of {capacity} descriptors\n",
+        "FIRMWARE boot services ended at try {attempts} of {} in {millis} ms, map {} of \
+         {capacity} descriptors\n",
         boot_exit::ATTEMPTS,
         map.bytes / map.descriptor_bytes,
     ));

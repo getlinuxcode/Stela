@@ -195,6 +195,39 @@ pub(super) fn host_drivers_held_here() -> bool {
     let gs = unsafe { crate::cpu::msr::GS_BASE.read() };
     gs != 0 && HOST_DRIVERS_GS.load(Ordering::Acquire) == gs
 }
+/// Whether this activated processor holds the host drivers' lock, which
+/// every Linux entry holds on whichever processor it runs: one load while
+/// nobody holds it, and no RDMSR.
+#[cfg_attr(not(feature = "nvk"), allow(dead_code))]
+pub(super) fn holds_host_drivers() -> bool {
+    HOST_DRIVERS.load(Ordering::Acquire)
+        && HOST_DRIVERS_GS.load(Ordering::Acquire) == super::host::activated_base()
+}
+
+/// Run `read`, a bounded read of state only Linux entries change, with no
+/// Linux entry running on another processor: holding the host drivers'
+/// lock, taken only when free (`None` when another processor holds it), or
+/// as this processor already does. No root changes and no driver is called.
+#[cfg_attr(not(feature = "nvk"), allow(dead_code))]
+pub(super) fn with_drivers_held<T>(read: impl FnOnce() -> T) -> Option<T> {
+    if holds_host_drivers() {
+        return Some(read());
+    }
+    if !try_lock_host_drivers() {
+        return None;
+    }
+    let flags: u64;
+    // SAFETY: CPL0 IF save; restored below on this processor.
+    unsafe { asm!("pushfq", "pop {}", "cli", out(reg) flags) };
+    HOST_DRIVERS_GS.store(super::host::activated_base(), Ordering::Release);
+    let result = read();
+    HOST_DRIVERS_GS.store(0, Ordering::Release);
+    HOST_DRIVERS.store(false, Ordering::Release);
+    // SAFETY: the save above, on this processor.
+    unsafe { asm!("push {}", "popfq", in(reg) flags) };
+    Some(result)
+}
+
 /// The GS base of the processor starting the host's devices, zero while
 /// none does ([`starting_devices_here`]).
 static STARTING_GS: AtomicU64 = AtomicU64::new(0);
@@ -664,6 +697,8 @@ impl Service {
         result: Result<T, BlockError>,
     ) -> Result<T, BlockError> {
         if let Err(error) = &result {
+            // What the USB storage recovery did for it comes first.
+            report_usb_recoveries();
             self.failures += 1;
             if self.failures <= 16 || self.failures.is_power_of_two() {
                 output::arguments(format_args!(
@@ -674,6 +709,35 @@ impl Service {
             }
         }
         result
+    }
+}
+
+/// One line per USB storage command the recovery ladder ran for since the
+/// last call (`stela_drivers::usb::storage::take_recoveries`): what failed
+/// it, the furthest step that ran, and whether it completed.
+fn report_usb_recoveries() {
+    let (recoveries, replaced) = stela_drivers::usb::storage::take_recoveries();
+    for recovery in &recoveries {
+        output::arguments(format_args!("HOST USB DISK RECOVERY {recovery}\n"));
+    }
+    if replaced != 0 {
+        output::arguments(format_args!(
+            "HOST USB DISK RECOVERY {replaced} more commands recovered or failed since the last report\n"
+        ));
+    }
+    let (changed, sense) = stela_drivers::usb::storage::take_media_changes();
+    if changed != 0 {
+        let why = sense.map_or(String::from("an eject"), |sense| {
+            format!(
+                "sense {:02x}/{:02x}/{:02x}",
+                sense.key, sense.asc, sense.ascq
+            )
+        });
+        output::arguments(format_args!(
+            "HOST USB DISK media changed on {changed} published units, the last by {why}: \
+             their disks fail until published again, as Linux's sd fails a removable unit \
+             after an unexpected UNIT ATTENTION\n"
+        ));
     }
 }
 
@@ -1564,6 +1628,7 @@ impl HostDisks {
                 Self::report_callback(serial, callbacks, tsc_hz, "periodic");
             }
         }
+        report_usb_recoveries();
         let refused = stela_drivers::usb::storage::take_cache_refusals();
         if refused != 0 {
             output::arguments(format_args!(
@@ -2035,6 +2100,9 @@ pub unsafe fn open(
     for (location, error) in &devices.platform_failures {
         output::arguments(format_args!("PLATFORM FAILED {location}: {error}\n"));
     }
+    for (location, why) in &devices.platform_unsupported {
+        output::arguments(format_args!("PLATFORM UNSUPPORTED {location}: {why}\n"));
+    }
     match &devices.regulatory {
         Some(Ok(_)) => output::arguments(format_args!("HOST Wi-Fi regulatory database loaded\n")),
         Some(Err(error)) => output::arguments(format_args!(
@@ -2166,11 +2234,19 @@ pub unsafe fn open(
             Ok(opened) => break opened,
             Err((at, error)) if at >= required => {
                 let (named, which) = optional.remove(at - required);
+                let why = describe(&named, error);
                 output::arguments(format_args!(
-                    "HOST PARTITION {} left out: {}\n",
+                    "HOST PARTITION {} left out: {why}\n",
                     which.role(),
-                    describe(&named, error)
                 ));
+                // The USB's log has nothing since the firmware's exit and
+                // gets nothing more: the screen says so once.
+                if matches!(which, Optional::Log) {
+                    output::log_lost(
+                        output::Log::Usb,
+                        format_args!("Stela's drivers did not find its partition: {why}"),
+                    );
+                }
             }
             Err((at, error)) => {
                 let role = role_of(at, targets.len(), medium.is_some(), preboot.is_some());
@@ -2294,6 +2370,7 @@ pub unsafe fn open(
             root,
         ),
         gpus: core::mem::take(&mut devices.gpus),
+        isa_bridges: core::mem::take(&mut devices.isa_bridges),
         usb,
         usb_disks,
         disks: host_disks,
@@ -2635,6 +2712,9 @@ pub struct Opened {
     pub bluetooth: Option<super::bluetooth::HostBluetooth>,
     /// The display controllers probe left for their own drivers.
     pub gpus: alloc::vec::Vec<stela_drivers::gpu::Adapter>,
+    /// The PCI-to-ISA bridges probe read, which a GPU's kernel driver may
+    /// name the chipset by.
+    pub isa_bridges: alloc::vec::Vec<stela_drivers::probe::IsaBridge>,
     /// The xHCI controllers' topology owners, polled for hotplug.
     pub usb: super::usb::HostUsb,
     /// Whole disks for the guest's USB mass storage, in option order.

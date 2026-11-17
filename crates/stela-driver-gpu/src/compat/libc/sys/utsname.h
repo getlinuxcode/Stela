@@ -1,9 +1,8 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
-/* AMD fork (J7): RADV's hang report names the system (`uname`), which the
- * image has none of to name; the call refuses (`mesa/radv_libc.c`). */
-#ifndef STELA_SYS_UTSNAME_H
-#define STELA_SYS_UTSNAME_H
-
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+#ifndef STELA_LIBC_SYS_UTSNAME_H
+#define STELA_LIBC_SYS_UTSNAME_H
+#include <sys/cdefs.h>
+__BEGIN_DECLS
 struct utsname {
 	char sysname[65];
 	char nodename[65];
@@ -12,7 +11,7 @@ struct utsname {
 	char machine[65];
 	char domainname[65];
 };
-
+/* No kernel of its own to name: fails, so callers leave its version out. */
 int uname(struct utsname *name);
-
+__END_DECLS
 #endif

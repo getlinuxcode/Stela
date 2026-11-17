@@ -193,6 +193,14 @@ impl Node {
         self.wedge_bot();
         self.bot.as_mut().unwrap().acks_reset = true;
     }
+    /// Break the BOT peer's link until a port reset readdresses it
+    /// ([`bot::Disk::broken`]).
+    pub fn break_bot_link(&mut self) {
+        self.bot.as_mut().expect("BOT peer required").broken = true;
+    }
+    pub fn bot_link_broken(&self) -> bool {
+        self.bot.as_ref().expect("BOT peer required").broken
+    }
     /// The BOT peer's RAM medium.
     pub fn bot_media(&mut self) -> &mut [u8] {
         self.bot.as_mut().expect("BOT peer required").media()
@@ -651,6 +659,7 @@ impl Hardware {
                             .and_then(|node| node.bot.as_mut())
                     {
                         disk.wedged = false;
+                        disk.broken = false;
                         disk.reset();
                     }
                     self.contexts.push((slot, kind, words));
@@ -724,6 +733,9 @@ impl Hardware {
             (0x21, 0xff) if node.bot.is_some() => {
                 assert_eq!(request, setup(0x21, 0xff, 0, 0, 0));
                 let disk = node.bot.as_ref().unwrap();
+                if disk.broken {
+                    return Err(transfer::USB_TRANSACTION_ERROR);
+                }
                 if disk.wedged && disk.acks_reset {
                     return Ok(Vec::new());
                 }
@@ -1102,6 +1114,22 @@ impl Hardware {
                 .bot
                 .as_mut()
             {
+                if disk.broken {
+                    // A halted endpoint's dequeue pointer stays on the TD
+                    // that failed: a soft retry runs it again.
+                    self.endpoints.get_mut(&(slot, dci)).unwrap().at = trb;
+                    let output = self.outputs[&slot] + u64::from(dci) * self.context_bytes as u64;
+                    write32(output, read32(output) & !7 | ENDPOINT_HALTED);
+                    self.event(
+                        trb,
+                        transfer::USB_TRANSACTION_ERROR,
+                        TRANSFER_EVENT,
+                        slot,
+                        dci,
+                        length as usize,
+                    );
+                    return;
+                }
                 if disk.wedged {
                     assert!(self.withheld.insert((slot, dci), trb).is_none());
                     if self.routes[&slot] == 0

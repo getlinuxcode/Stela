@@ -11,8 +11,8 @@
 //! or of that bridge's bus can end it. Stela never changes those windows
 //! (their routing seal holds them as firmware left them), so the answer
 //! stays true for the boot. A GPU there leaves the screen to the adapter
-//! showing it, which then shows macOS's frames, copied
-//! ([`copied_refresh`]).
+//! showing it, which then shows macOS's frames, copied at the panel's
+//! rate.
 use core::ops::{Range, RangeInclusive};
 
 /// The legacy VGA memory a bridge forwards with VGA Enable set.
@@ -161,18 +161,6 @@ pub fn gpu_may_show(apart: &BusesApart, segment: u16, bus: u8) -> bool {
     !apart.holds(segment, bus)
 }
 
-/// The highest refresh a display copied from a GPU to the firmware's screen
-/// runs at: the CPU composes each frame from guest memory and writes it to
-/// that screen, so a faster panel would only make macOS draw frames the copy
-/// drops.
-pub const COPIED_REFRESH_MILLIHERTZ: u32 = 60_000;
-
-/// The refresh a copied display runs at on a panel that runs at `panel`
-/// millihertz.
-pub fn copied_refresh(panel: u32) -> u32 {
-    panel.min(COPIED_REFRESH_MILLIHERTZ)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,13 +298,5 @@ mod tests {
         }
         assert_eq!(apart.count(), 8);
         assert!(apart.holds(0, 255) && apart.holds(0, 64) && !apart.holds(0, 65));
-    }
-
-    #[test]
-    fn a_copied_display_runs_at_60_hz_at_most() {
-        assert_eq!(copied_refresh(144_420), 60_000);
-        assert_eq!(copied_refresh(120_001), 60_000);
-        assert_eq!(copied_refresh(60_000), 60_000);
-        assert_eq!(copied_refresh(59_940), 59_940);
     }
 }

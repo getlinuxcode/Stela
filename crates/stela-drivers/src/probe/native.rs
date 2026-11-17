@@ -802,13 +802,13 @@ impl wifi::intel::boot::FunctionOwner for IntelOwner {
 /// way down, then the function. `bridges` lists each PCI bridge with its
 /// secondary bus.
 #[cfg(feature = "native-acpi")]
-pub(super) fn companion(
-    session: &'static crate::platform::acpi::Session,
+pub(super) fn companion<'a>(
+    session: &'a crate::platform::acpi::Session,
     address: Address,
     bridges: &[Bridge],
-) -> Option<crate::platform::acpi::Handle<'static>> {
+) -> Option<crate::platform::acpi::Handle<'a>> {
     use crate::platform::acpi::Handle;
-    let parent = |handle: Handle<'static>| -> Option<String> {
+    let parent = |handle: Handle<'a>| -> Option<String> {
         let path = handle.path().ok()?;
         path.rsplit_once('.')
             .map(|(parent, _)| String::from(parent))
@@ -829,7 +829,7 @@ pub(super) fn companion(
         // acpi_find_child_device and find_child_checks: an enabled device
         // without _HID wins; one without _STA or with a _HID only scores
         // lower; a bridge's companion needs children.
-        let mut best: Option<(u8, Handle<'static>)> = None;
+        let mut best: Option<(u8, Handle<'a>)> = None;
         for &device in &devices {
             if parent(device).as_deref() != Some(path.as_str())
                 || integer(device, "_ADR") != Some(adr)
@@ -1151,79 +1151,6 @@ pub enum PcieController {
     },
 }
 
-/// Said of a PCI port whose secondary bus answers nothing while ACPI reports
-/// the power below it off: the device there, a hybrid laptop's GPU often,
-/// is in D3cold. Linux powers such a port on as it adds it (`pci_pm_init`,
-/// `pci_power_up`, `acpi_pci_set_power_state`: each off `_PR0` power
-/// resource's `_ON`, then `_PS0`, then `_REG`) before it scans below it.
-#[cfg(feature = "native-acpi")]
-pub(super) const POWERED_OFF_PORT: &str = "its secondary bus answers nothing and ACPI reports the \
-     power below it off (D3cold); Stela does not power PCI ports on: their AML writes PCI \
-     configuration, which Stela's PCI owner keeps from AML, and a function that answers after \
-     the PCI census is refused";
-
-/// The bridges among `bridges` with a secondary bus that holds none of the
-/// functions `found`.
-#[cfg(any(test, feature = "native-acpi"))]
-pub(super) fn empty_ports<'a>(
-    bridges: &'a [Bridge],
-    found: &'a [(Address, [u8; 3])],
-) -> impl Iterator<Item = &'a Bridge> + 'a {
-    bridges.iter().filter(|bridge| {
-        // A bridge without a bus number of its own forwards nothing yet.
-        bridge.secondary > bridge.address.bus
-            && !found.iter().any(|(address, _)| {
-                address.segment == bridge.address.segment && address.bus == bridge.secondary
-            })
-    })
-}
-
-/// Whether a device's power is off as Linux's `acpi_bus_init_power` infers
-/// it: `_PSC` above D0 when present, else any of its `_PR0` power
-/// resources off (`_STA` 0); `resources` holds each resource's `_STA`,
-/// `None` where it did not evaluate.
-#[cfg(any(test, feature = "native-acpi"))]
-pub(super) fn power_off(psc: Option<u64>, resources: &[Option<u64>]) -> bool {
-    match psc {
-        Some(state) => state != 0,
-        None => resources.contains(&Some(0)),
-    }
-}
-
-/// The ports among `bridges` with an empty secondary bus whose ACPI
-/// companion reports their power off ([`power_off`]), each with
-/// [`POWERED_OFF_PORT`]. Only `_PSC`, `_PR0` and its resources' `_STA` are
-/// evaluated; nothing is turned on.
-#[cfg(feature = "native-acpi")]
-pub(super) fn powered_off_ports(
-    session: &'static crate::platform::acpi::Session,
-    bridges: &[Bridge],
-    found: &[(Address, [u8; 3])],
-) -> Vec<Address> {
-    use crate::platform::acpi::Value;
-    let mut off = Vec::new();
-    for bridge in empty_ports(bridges, found) {
-        let Some(handle) = companion(session, bridge.address, bridges) else {
-            continue;
-        };
-        let psc = integer(handle, "_PSC");
-        let mut resources = Vec::new();
-        if handle.child("_PR0").is_ok()
-            && let Ok(Some(Value::Package(listed))) = handle.evaluate(Some("_PR0"), &[])
-        {
-            for resource in listed {
-                if let Value::Reference(resource) = resource {
-                    resources.push(integer(resource.handle, "_STA"));
-                }
-            }
-        }
-        if power_off(psc, &resources) {
-            off.push(bridge.address);
-        }
-    }
-    off
-}
-
 /// The root buses of `segment`, as the ACPI host bridges' `_SEG` and `_BBN`
 /// declare them.
 #[cfg(feature = "native-acpi")]
@@ -1241,9 +1168,9 @@ pub(super) fn root_buses(
 
 /// Each ACPI PCI host bridge with its `_SEG` and `_BBN`, zero when absent.
 #[cfg(feature = "native-acpi")]
-fn roots(
-    session: &'static crate::platform::acpi::Session,
-) -> Vec<(crate::platform::acpi::Handle<'static>, u16, u8)> {
+pub(super) fn roots(
+    session: &crate::platform::acpi::Session,
+) -> Vec<(crate::platform::acpi::Handle<'_>, u16, u8)> {
     let mut roots = session.devices("PNP0A08").unwrap_or_default();
     roots.extend(session.devices("PNP0A03").unwrap_or_default());
     roots
@@ -1258,7 +1185,7 @@ fn roots(
 
 /// The integer `name` evaluates to on `handle`, when it has one.
 #[cfg(feature = "native-acpi")]
-fn integer(handle: crate::platform::acpi::Handle<'static>, name: &str) -> Option<u64> {
+pub(super) fn integer(handle: crate::platform::acpi::Handle<'_>, name: &str) -> Option<u64> {
     use crate::platform::acpi::Value;
     handle.child(name).ok()?;
     match handle.evaluate(Some(name), &[]).ok()? {
@@ -1574,34 +1501,6 @@ pub(super) unsafe fn intel_bluetooth(
 mod tests {
     use super::*;
     use crate::probe::services::tests::Refusing;
-
-    /// A port whose secondary bus answers nothing is empty; ACPI reports
-    /// its power off by `_PSC`, else by an off `_PR0` resource.
-    #[test]
-    fn empty_ports_with_power_off_are_named() {
-        let at = |bus, device| Address {
-            segment: 0,
-            bus,
-            device,
-            function: 0,
-        };
-        let bridge = |address, secondary| Bridge {
-            address,
-            secondary,
-            aspm: 0,
-        };
-        let bridges = [bridge(at(0, 1), 1), bridge(at(0, 0x1c), 2)];
-        let found = [(at(0, 0x1c), [6, 4, 0]), (at(2, 0), [2, 0, 0])];
-        let empty: Vec<_> = empty_ports(&bridges, &found)
-            .map(|bridge| bridge.address)
-            .collect();
-        assert_eq!(empty, [at(0, 1)]);
-        assert!(power_off(Some(3), &[]));
-        assert!(!power_off(Some(0), &[Some(0)]), "_PSC decides");
-        assert!(power_off(None, &[Some(1), Some(0)]));
-        assert!(!power_off(None, &[Some(1), None]));
-        assert!(!power_off(None, &[]));
-    }
 
     fn address() -> Address {
         Address {

@@ -277,6 +277,14 @@ impl AppleDevices {
         Some((network.up(), network.counters()))
     }
 
+    /// The carrier of the host link the guest's USB Ethernet adapter is
+    /// bridged to, which the guest sees as its cable (`Ecm::set_carrier`).
+    pub fn network_carrier(&mut self, carrier: bool) {
+        if let Ok(network) = self.usb_network() {
+            network.set_carrier(carrier);
+        }
+    }
+
     /// Whether the guest's USB Ethernet adapter has room for a frame from
     /// the host network; false without an adapter.
     pub fn network_room(&mut self) -> bool {

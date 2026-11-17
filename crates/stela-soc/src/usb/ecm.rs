@@ -11,7 +11,11 @@
 //! data interface, class 10.
 //!
 //! The adapter reports a fixed 1 Gb/s link that is up while the data
-//! interface's second alternate setting is selected. Its packet filter
+//! interface's second alternate setting is selected and the host link it
+//! is bridged to has carrier ([`Ecm::set_carrier`]): a carrier change while
+//! the setting is selected is a NetworkConnection notification, as a NIC's
+//! cable plug or pull, so the guest asks for an address again once a late
+//! host link comes up. Its packet filter
 //! (6.2.4) takes effect on received frames. It has [`MULTICAST_FILTERS`]
 //! perfect multicast filters (wNumberMCFilters D15 clear):
 //! SET_ETHERNET_MULTICAST_FILTERS (6.2.1) replaces the whole list, and
@@ -191,6 +195,9 @@ struct State {
     mac: Mac,
     /// The data interface's alternate setting: 1 moves frames.
     alternate: u8,
+    /// Whether the host link the adapter is bridged to has carrier; true
+    /// until its owner says otherwise.
+    carrier: bool,
     filter: u16,
     /// The multicast groups PACKET_TYPE_MULTICAST passes.
     multicast: Vec<Mac>,
@@ -358,6 +365,7 @@ impl Ecm {
                 ncm: (model == Model::Ncm).then(ncm::Ncm::new),
                 mac,
                 alternate: 0,
+                carrier: true,
                 filter: DIRECTED | BROADCAST | ALL_MULTICAST,
                 multicast: Vec::new(),
                 halted: [false; 3],
@@ -378,6 +386,19 @@ impl Ecm {
     /// setting selected).
     pub fn up(&self) -> bool {
         self.control.configuration() != 0 && self.state.alternate == 1
+    }
+
+    /// The bridged host link's carrier. A change while the guest has the
+    /// data setting selected is notified at once (NetworkConnection, after
+    /// ConnectionSpeedChange when it connects); otherwise the next
+    /// selection reports it.
+    pub fn set_carrier(&mut self, carrier: bool) {
+        if core::mem::replace(&mut self.state.carrier, carrier) == carrier {
+            return;
+        }
+        if self.up() {
+            self.state.notify_connection();
+        }
     }
 
     pub fn counters(&self) -> Counters {
@@ -489,8 +510,17 @@ impl State {
         self.zero_length_due = false;
         self.halted[1] = false;
         self.halted[2] = false;
+        self.notify_connection();
+    }
+
+    /// Queue the link's state as the guest should see it: connected while
+    /// the data setting is selected and the host link has carrier, the
+    /// speed first when it is.
+    fn notify_connection(&mut self) {
+        // Only the latest state matters: one the guest has not read yet is
+        // replaced, so a flapping link cannot grow the queue.
         self.notifications.clear();
-        let connected = u16::from(alternate == 1);
+        let connected = u16::from(self.alternate == 1 && self.carrier);
         if connected == 1 {
             let speed = LINK_BITS_PER_SECOND.to_le_bytes();
             let mut speeds = speed.to_vec();
@@ -830,6 +860,44 @@ mod tests {
         transfer(&mut e, setup(0x01, SET_INTERFACE, 0, 1, 0), &[]).unwrap();
         assert_eq!(read(&mut e, NOTIFY).unwrap()[2], 0);
         assert!(transfer(&mut e, setup(0x01, SET_INTERFACE, 2, 1, 0), &[]).is_err());
+    }
+
+    #[test]
+    fn the_guest_link_follows_the_host_carrier() {
+        // A host link without carrier when the guest selects the data
+        // setting: the guest sees no connection.
+        let mut e = adapter(false);
+        e.set_carrier(false);
+        assert_eq!(read(&mut e, NOTIFY), None, "nothing before the selection");
+        transfer(&mut e, setup(0x01, SET_INTERFACE, 1, 1, 0), &[]).unwrap();
+        assert_eq!(
+            read(&mut e, NOTIFY).unwrap(),
+            [0xa1, NETWORK_CONNECTION, 0, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(read(&mut e, NOTIFY), None);
+        // The carrier comes up late: speed, then connected, at once.
+        e.set_carrier(true);
+        assert_eq!(e.ready_at(NOTIFY), Some(0));
+        let speed = read(&mut e, NOTIFY).unwrap();
+        assert_eq!(&speed[..2], &[0xa1, CONNECTION_SPEED_CHANGE]);
+        assert_eq!(
+            read(&mut e, NOTIFY).unwrap(),
+            [0xa1, NETWORK_CONNECTION, 1, 0, 0, 0, 0, 0]
+        );
+        // The same state again says nothing.
+        e.set_carrier(true);
+        assert_eq!(read(&mut e, NOTIFY), None);
+        // A pull and a plug the guest has not read yet leave the last.
+        e.set_carrier(false);
+        e.set_carrier(true);
+        e.set_carrier(false);
+        assert_eq!(
+            read(&mut e, NOTIFY).unwrap()[..3],
+            [0xa1, NETWORK_CONNECTION, 0]
+        );
+        assert_eq!(read(&mut e, NOTIFY), None);
+        // The guest's own setting stays what it selected.
+        assert!(e.up());
     }
 
     #[test]

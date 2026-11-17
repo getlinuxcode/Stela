@@ -33,6 +33,28 @@ pub(super) const EXIT_NAMES: [&str; step_timing::EXIT_SLOTS] = [
     "check-translated",
 ];
 
+/// `PES PAC` for the beat's cipher runs of every PE together
+/// (`step_timing::PAC_CENSUS_WORDS`): `fills=N` then each key's
+/// `KEY=S/A/G` signings, authentications and PACGAs, then the causes
+/// `new=` (no PE computed that result before, as far as the shared table
+/// remembers), `here=` (this PE did and its memo lost it), `other=` (another
+/// PE did), `native=F/C` (the runs from native code, and its calls of the
+/// service) and the new key generations `generations=`.
+fn pac_census_line(census: &[u64; step_timing::PAC_CENSUS_WORDS]) -> String {
+    const KEYS: [&str; 5] = ["ia", "ib", "da", "db", "ga"];
+    let fills: u64 = census[..KEYS.len() * 3].iter().sum();
+    let mut line = format!("PES PAC fills={fills}");
+    for (key, [signed, authenticated, generic]) in KEYS.iter().zip(census.as_chunks::<3>().0) {
+        line.push_str(&format!(" {key}={signed}/{authenticated}/{generic}"));
+    }
+    let causes = &census[KEYS.len() * 3..];
+    line.push_str(&format!(
+        " new={} here={} other={} native={}/{} generations={}",
+        causes[0], causes[1], causes[2], causes[3], causes[4], causes[5]
+    ));
+    line
+}
+
 /// `--profile`'s heartbeat lines: of `elapsed` ticks, the share inside the
 /// engine (`sliced`) and in each of its phases, the rest of the engine's
 /// time unattributed, and each exit kind's count, share and mean cost.
@@ -559,6 +581,9 @@ fn hot_blocks_report<H: Host>(
     total.merge(&hot);
     if whole {
         hot_total_report(total);
+        // Address spaces are reused by later processes: the total by
+        // address space covers the beats since the last total report.
+        total.asids = Default::default();
     }
     if hot.is_empty() {
         return;
@@ -575,6 +600,50 @@ fn hot_blocks_report<H: Host>(
         let mut line = format!("PES HOT {name} samples={samples} other={}", hot.other);
         for block in hot.top(level, SHOWN) {
             push_hot_block(&mut line, level, &block);
+        }
+        output::arguments(format_args!("{line}\n"));
+    }
+    hot_asids_report("PES HOT", &hot.asids, 10, 3, 8);
+}
+
+/// `{prefix} ASIDS samples=N other=M asid:user/kernel/guarded ...`: the
+/// samples by the guest address space they ran in (`step_timing::AsidSamples`;
+/// per beat, and under `PES HOT TOTAL` over the [`HOT_TOTAL_BEATS`] beats
+/// since the last total),
+/// the `spaces` with most first, then for the `named` first of them a
+/// `{prefix} ASID asid pc:count ...` line of its `blocks` most sampled EL0
+/// blocks, whose frameworks name the process: how much of the guest's time
+/// one process takes, in user code and in the kernel on its behalf, where
+/// the per-level lines mix every process.
+fn hot_asids_report(
+    prefix: &str,
+    asids: &step_timing::AsidSamples,
+    spaces: usize,
+    named: usize,
+    blocks: usize,
+) {
+    let top = asids.top(spaces);
+    if top.is_empty() {
+        return;
+    }
+    let samples: u64 = asids.spaces.iter().map(|space| space.total()).sum();
+    let mut line = format!(
+        "{prefix} ASIDS samples={samples} other={} asid:user/kernel/guarded",
+        asids.other
+    );
+    for space in &top {
+        let [user, kernel, guarded] = space.samples;
+        line.push_str(&format!(" {:#x}:{user}/{kernel}/{guarded}", space.asid));
+    }
+    output::arguments(format_args!("{line}\n"));
+    for space in top.iter().take(named) {
+        let shown = asids.top_blocks(space.asid, blocks);
+        if shown.is_empty() {
+            continue;
+        }
+        let mut line = format!("{prefix} ASID {:#x}", space.asid);
+        for block in shown {
+            line.push_str(&format!(" {:#x}:{}", block.pc, block.count));
         }
         output::arguments(format_args!("{line}\n"));
     }
@@ -632,6 +701,7 @@ fn hot_total_report(total: &step_timing::HotBlocks) {
         }
         output::arguments(format_args!("{line}\n"));
     }
+    hot_asids_report("PES HOT TOTAL", &total.asids, 16, 6, 24);
 }
 
 /// The end of the `PES STAMPED` line under step timing: for RET, BLR, BR
@@ -926,8 +996,9 @@ pub(super) fn run<H: Host>(
                 let hub = machine.devices.hub();
                 let millis = |counts: u64| u128::from(counts) * 1000 / u128::from(host::COUNTER_HZ);
                 output::arguments(format_args!(
-                    "CLOCK AT STOP stalled_ms={} lag_ms={}\n",
+                    "CLOCK AT STOP stalled_ms={} leased_ms={} lag_ms={}\n",
                     millis(hub.clock_stalled()),
+                    millis(hub.clock_leased()),
                     millis(hub.clock_lag().0),
                 ));
             }
@@ -1783,6 +1854,8 @@ impl Heartbeat {
                 u128::from(elapsed) * u128::from(host::COUNTER_HZ) / u128::from(tsc_hz.max(1));
             let guest = count.wrapping_sub(self.clock_count);
             let stalled = machine.devices.hub().clock_stalled();
+            // The part of it a lease held while a kernel spin was old.
+            let leased = machine.devices.hub().clock_leased();
             // What the count still lags host time by after holds, and how
             // much of the lag it made up since the last beat.
             let (lag, repaid) = machine.devices.hub().clock_lag();
@@ -1790,10 +1863,11 @@ impl Heartbeat {
                 let rate = u128::from(guest) * 1000 / wall.max(1);
                 let millis = |counts: u64| u128::from(counts) * 1000 / u128::from(host::COUNTER_HZ);
                 output::arguments(format_args!(
-                    "CLOCK RATE guest_per_wall={}.{:03} stalled_ms={} lag_ms={} repaid_ms={}\n",
+                    "CLOCK RATE guest_per_wall={}.{:03} stalled_ms={} leased_ms={} lag_ms={} repaid_ms={}\n",
                     rate / 1000,
                     rate % 1000,
                     millis(stalled),
+                    millis(leased),
                     millis(lag),
                     millis(repaid),
                 ));
@@ -1875,8 +1949,11 @@ impl Heartbeat {
             // TLBIs of everything that forgot every context (its own, and
             // another PE's or its mail's), ones that reached nothing of the
             // regime it translates in (forgetting other regimes' contexts,
-            // or none), contexts made, TLBIs its mail merged, and pages
-            // walked again at once for contexts made anew.
+            // or none), contexts made, TLBIs its mail merged, pages
+            // walked again at once for contexts made anew, entries dropped
+            // in every context by where (the upper half, no ASID, a global
+            // page), pages taken with another page of their leaf, and
+            // lower-half global pages taken in the shared context.
             // Per PE: GENTER completed natively and by the engine, then
             // GEXIT's, SVC's and ERET's.
             let mut transitions =
@@ -1892,7 +1969,7 @@ impl Heartbeat {
             let mut itlb_sources = String::from(concat!(
                 "PES ITLBSRC fills_lower/fills_upper/cold_seen/drop_asid/drop_every",
                 "/all_local/all_received/all_forgot/all_kept/made/mail_merged/refilled",
-                "/drop_upper/drop_no_asid/drop_global",
+                "/drop_upper/drop_no_asid/drop_global/leaf_fills/shared_fills",
             ));
             // Per PE: its installs at EL0 and then above EL0 by where the
             // block came from: compiled in a page the store keys (offered
@@ -1913,7 +1990,21 @@ impl Heartbeat {
             ));
             let mut stamped_in_use = 0;
             let mut predicted = 0;
+            // All PEs: cell probe transfers, then the cells held, those
+            // past the stamped ones and those holding no entry (levels),
+            // the hot exits promotion left waiting for their cell's entry,
+            // the cell samples promotion read and the hot exits it found
+            // every stamped cell held for.
+            let mut cell_probes = 0;
+            let mut waiting = 0;
+            let mut samples = 0;
+            let mut full = 0;
+            let mut cells = (0, 0, 0);
+            // All PEs: paired returns matched and missed, and calls past
+            // the frame bound (`chain::PairCount`).
+            let mut pairs = [0u64; stela_compiler::x86_64::chain::PAIR_COUNTS];
             let mut pac_fills = 0;
+            let mut pac_census = [0u64; step_timing::PAC_CENSUS_WORDS];
             let deltas = |line: &mut String, pe: usize, now: &[u64], before: &[u64]| {
                 line.push_str(&format!(" {pe}:"));
                 for (slot, (now, before)) in now.iter().zip(before).enumerate() {
@@ -2075,7 +2166,26 @@ impl Heartbeat {
                 ));
                 stamped_in_use = stamped_in_use.max(now.stamped[promoted]);
                 predicted += now.stamped[promoted + 1].saturating_sub(before.stamped[promoted + 1]);
+                cell_probes +=
+                    now.stamped[promoted + 3].saturating_sub(before.stamped[promoted + 3]);
+                cells.0 = cells.0.max(now.stamped[promoted + 4]);
+                cells.1 = cells.1.max(now.stamped[promoted + 5]);
+                cells.2 = cells.2.max(now.stamped[promoted + 6]);
+                waiting += now.stamped[promoted + 7].saturating_sub(before.stamped[promoted + 7]);
+                samples += now.stamped[promoted + 8].saturating_sub(before.stamped[promoted + 8]);
+                full += now.stamped[promoted + 9].saturating_sub(before.stamped[promoted + 9]);
+                for (total, (now, before)) in
+                    pairs.iter_mut().zip(now.pairs.iter().zip(&before.pairs))
+                {
+                    *total += now.saturating_sub(*before);
+                }
                 pac_fills += now.pac_fills.saturating_sub(before.pac_fills);
+                for (sum, (now, before)) in pac_census
+                    .iter_mut()
+                    .zip(now.pac_census.iter().zip(&before.pac_census))
+                {
+                    *sum += now.saturating_sub(*before);
+                }
                 deltas(
                     &mut store,
                     pe,
@@ -2264,7 +2374,15 @@ impl Heartbeat {
                 ));
             }
             output::arguments(format_args!("{store}\n"));
-            stamped.push_str(&format!(" in_use={stamped_in_use}"));
+            if machine.step_timing().is_some() {
+                output::arguments(format_args!("{}\n", pac_census_line(&pac_census)));
+            }
+            stamped.push_str(&format!(
+                " in_use={stamped_in_use} cell_probes={cell_probes} cells={}/{}/{} waiting={waiting} samples={samples} full={full}",
+                cells.0, cells.1, cells.2
+            ));
+            let [matched, missed, refused] = pairs;
+            stamped.push_str(&format!(" pairs={matched}/{missed}/{refused}"));
             stamped_line = Some((stamped, predicted, pac_fills));
             if machine.step_timing().is_some() {
                 output::arguments(format_args!("{phases}\n"));
@@ -2418,10 +2536,11 @@ fn board_code(
     )
 }
 
-/// `HEAP small=310M large=62M 128K:352/73M cores=300M/20M classes=16:8M,…`:
-/// the heap's live bytes in size-class blocks and free-list allocations,
-/// the latter by power of two where a size holds a megabyte or more, each
-/// tagged core's share, the tagged cores' bytes by size class, the failed
+/// `HEAP small=310M large=62M 128K:352/73M cores=300M/20M classes=16:8M,…
+/// slabs=4800/40M`: the heap's live bytes in size-class blocks and
+/// free-list allocations, the latter by power of two where a size holds a
+/// megabyte or more, each tagged core's share, the tagged cores' bytes by
+/// size class, the size-class slabs and their free blocks' bytes, the failed
 /// allocations so far and whether the heap is low.
 fn heap_report(heap: &stela_boot_core::heap::Usage) {
     let large: usize = heap.large.iter().map(|&(_, bytes)| bytes).sum();
@@ -2453,6 +2572,8 @@ fn heap_report(heap: &stela_boot_core::heap::Usage) {
         .map(|(class, &bytes)| format!("{}:{}M", 16 << class, bytes >> 20))
         .collect();
     line.push_str(&format!(" classes={}", classes.join(",")));
+    // The size-class slabs, and the bytes of free blocks they keep.
+    line.push_str(&format!(" slabs={}/{}M", heap.slabs, heap.slab_free >> 20));
     // Allocations that found no memory, which fallible callers survive, and
     // whether the heap is low enough that the engine gives memory back.
     line.push_str(&format!(

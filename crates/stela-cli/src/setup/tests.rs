@@ -5682,7 +5682,12 @@ fn a_usb_made_without_an_nvidia_gpu_needs_no_firmware_step() {
         lines.push(line);
     }
     assert_eq!(lines[0], lines[1]);
-    assert!(lines[0].contains("115.8 MiB"), "{}", lines[0]);
+    let size = if cfg!(feature = "amdgpu-port") {
+        "184.9 MiB"
+    } else {
+        "177.0 MiB"
+    };
+    assert!(lines[0].contains(size), "{}", lines[0]);
     f.host.nvidia_gpus.borrow_mut().clear();
     let report = setup(&environment(&f.host), installed_command(&f)).unwrap();
     assert!(!report.contains("NVIDIA"), "{report}");

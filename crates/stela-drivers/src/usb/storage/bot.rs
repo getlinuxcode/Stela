@@ -41,7 +41,8 @@ const RESET_RECOVERY_US: u64 = 6_000_000;
 const MAX_LUN: u8 = 15;
 /// xHCI completion code 22: the slot must be retired, not cancelled.
 const INCOMPATIBLE_DEVICE: u32 = 22;
-const PROTOCOL_ERROR: BlockError = BlockError::Protocol("malformed Bulk-Only wrapper or transfer");
+pub(super) const PROTOCOL_ERROR: BlockError =
+    BlockError::Protocol("malformed Bulk-Only wrapper or transfer");
 const SHORT_WRITE: BlockError = BlockError::Protocol("short Bulk-Only write");
 
 pub(super) fn supported(device: &Device) -> Result<(), &'static str> {
@@ -175,11 +176,6 @@ pub(super) trait Io {
     {
         None
     }
-    /// Whether [`Self::reset_device`] needs fresh rings from its allocator,
-    /// as a device behind a hub does.
-    fn reset_needs_allocation(&self) -> bool {
-        false
-    }
     /// The device's port status for a log line, where the host reads one.
     fn port_status(&mut self) -> Option<String> {
         None
@@ -251,19 +247,12 @@ impl Io for Native {
         Some(bot.reset_and_rebind(dma))
     }
 
-    fn reset_needs_allocation(&self) -> bool {
-        self.controller
-            .try_borrow()
-            .is_ok_and(|controller| controller.reset_needs_allocation(self.id))
-    }
-
     fn port_status(&mut self) -> Option<String> {
         self.controller.try_borrow_mut().ok()?.port_status(self.id)
     }
 
-    /// A root device's reset runs at once from its owner. During the first
-    /// scan, one behind a hub is reset by the storage service that runs the
-    /// scan, with the allocator its new rings need.
+    /// A device's reset runs at once from its owner, on a root port or
+    /// behind hubs, reusing its own storage; during the first scan too.
     fn port_reset_first(&self) -> bool {
         self.command_us.get() == SCAN_COMMAND_US
             || self
@@ -1380,8 +1369,8 @@ impl Bot<Native> {
         self.interface
     }
     /// Reconstruct the attachment while keeping its two transport
-    /// allocations. Root-leaf reset also reuses the controller's retired
-    /// resources; downstream reset keeps the existing allocation behavior.
+    /// allocations. The reset also reuses the controller's retired
+    /// resources, on a root port or behind hubs.
     /// Every fallible reconstruction step precedes moving either buffer owner.
     #[expect(
         clippy::result_large_err,
@@ -1391,7 +1380,15 @@ impl Bot<Native> {
         &mut self,
         dma: &mut dyn DmaAllocator,
     ) -> Result<Self, (alloc::string::String, BlockError)> {
-        let port = self.io.controller.borrow().root_port_of(self.io.id);
+        // A device generation that is no longer live is refused before any
+        // register access, its port status included.
+        let port = {
+            let controller = self.io.controller.borrow();
+            controller
+                .reset_reuses_storage(self.io.id)
+                .then(|| controller.root_port_of(self.io.id))
+                .flatten()
+        };
         self.reset_and_rebind_once(dma)
             .map_err(|(operation, error)| {
                 // The port as the failed step left it.
@@ -1440,7 +1437,7 @@ impl Bot<Native> {
         let mut fresh = unsafe {
             controller
                 .borrow_mut()
-                .reset_and_reuse_root(old, &self.endpoints, dma)?
+                .reset_and_reuse(old, &self.endpoints, dma)?
         };
         let id = fresh.id;
         let result = (|| {

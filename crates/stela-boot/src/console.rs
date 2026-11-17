@@ -134,6 +134,8 @@ pub struct Framebuffer {
     refresh_millihertz: u32,
     /// The monitor's image size in millimetres, from its EDID.
     size_mm: Option<(u32, u32)>,
+    /// The monitor's identity, from its EDID.
+    monitor: Option<stela_soc::machine::MonitorId>,
     /// The address of the registers that choose which of two frames in
     /// video memory shows, the one at `base` or the one after it, when the
     /// display has them (a virtual display's Bochs DISPI registers).
@@ -207,6 +209,7 @@ impl Framebuffer {
             firmware: true,
             refresh_millihertz: mode::refresh(width, height),
             size_mm: mode::size_mm(),
+            monitor: mode::monitor(),
             flip: None,
             pci_source: None,
         };
@@ -215,8 +218,7 @@ impl Framebuffer {
     }
 
     /// A blue-low `width` by `height` screen at `base`, `stride` pixels a row.
-    /// AMD fork: a Radeon's screen too (`engine/gpu_amd.rs`).
-    #[cfg(any(feature = "nvk", feature = "amdgpu"))]
+    #[cfg(feature = "nvk")]
     pub fn linear(base: usize, width: usize, height: usize, stride: usize) -> Self {
         Self {
             base,
@@ -228,6 +230,7 @@ impl Framebuffer {
             firmware: false,
             refresh_millihertz: stela_soc::scanout::DEFAULT_REFRESH_MILLIHERTZ,
             size_mm: None,
+            monitor: None,
             flip: None,
             pci_source: None,
         }
@@ -264,6 +267,11 @@ impl Framebuffer {
     /// The monitor's image size in millimetres, when its EDID gave one.
     pub fn size_mm(&self) -> Option<(u32, u32)> {
         self.size_mm
+    }
+
+    /// The monitor's identity, when the firmware gave its EDID.
+    pub fn monitor(&self) -> Option<stela_soc::machine::MonitorId> {
+        self.monitor
     }
 
     pub(crate) fn available(&self) -> bool {
@@ -803,6 +811,19 @@ pub fn release() -> bool {
     .is_some()
 }
 
+/// Stop drawing for good on the screen, whose memory may no longer be
+/// mapped, as a GPU's display after amdgpu's reset unmapped it: neither
+/// [`reclaim`] nor a stop draws on it again. False means another console
+/// operation was active.
+#[cfg(feature = "nvk")]
+pub fn forget_screen() -> bool {
+    with_consoles(|active, parked| {
+        *active = None;
+        *parked = None;
+    })
+    .is_some()
+}
+
 /// Permanently stop the boot CPU and guest compositor from touching GOP.
 /// Parked text can still be rebound to a native scanout.
 pub(crate) fn retire_firmware() -> bool {
@@ -816,6 +837,17 @@ pub(crate) fn retire_firmware() -> bool {
         true
     })
     .unwrap_or(false)
+}
+
+/// Undo [`retire_firmware`] for a GPU claim that stopped before the GPU was
+/// sealed and reset, so the firmware's picture still shows: the boot CPU and
+/// the guest's frames may draw there again, and the parked text returns.
+pub(crate) fn restore_firmware() -> bool {
+    let restored = FIRMWARE_ACCESS.restore();
+    if restored {
+        reclaim();
+    }
+    restored
 }
 
 /// Take the screen back after [`release`] and draw the kept text again, so

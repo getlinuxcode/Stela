@@ -194,12 +194,13 @@ fn shape_rules_follow_metal() {
     let mut shared = descriptor(TextureType::D2, PixelFormat::Rgba8Unorm);
     shared.options.storage_mode = StorageMode::Shared;
     assert!(texture(&capabilities, &shared).is_ok());
+    // Multisample too, with no CPU copies (Metal copies no samples).
     shared.texture_type = TextureType::D2Multisample;
     shared.sample_count = 4;
-    assert!(matches!(
-        texture(&capabilities, &shared),
-        Err(Error::Unsupported(_))
-    ));
+    assert_eq!(
+        texture(&capabilities, &shared).unwrap().cpu_access,
+        CpuAccess::None
+    );
 
     let mut huge = descriptor(TextureType::D2, PixelFormat::Rgba8Unorm);
     huge.width = 65536;
@@ -376,6 +377,50 @@ fn shared_textures_use_host_image_copies() {
     let plan = texture(&capabilities(), &shared).unwrap();
     assert_eq!(plan.cpu_access, CpuAccess::HostImageCopy);
     assert!(plan.image.usage.contains(ImageUsage::HOST_TRANSFER));
+}
+
+/// On Apple GPUs every storage mode is unified memory: shared textures of
+/// formats without host image copy are made, as NVK's depth and stencil
+/// formats are, and each keeps the CPU access Metal gives it.
+#[test]
+fn shared_textures_without_host_image_copy_are_made() {
+    let capabilities = capabilities();
+    let plan = |format, samples: u64| {
+        let mut shared = descriptor(TextureType::D2, format);
+        if samples > 1 {
+            shared.texture_type = TextureType::D2Multisample;
+        }
+        shared.sample_count = samples;
+        shared.usage = TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ;
+        shared.options = options(StorageMode::Shared);
+        texture(&capabilities, &shared)
+    };
+    for format in [
+        PixelFormat::Depth16Unorm,
+        PixelFormat::Depth32Float,
+        PixelFormat::Stencil8,
+    ] {
+        let made = plan(format, 1).unwrap();
+        assert_eq!(made.cpu_access, CpuAccess::Staged, "{format:?}");
+        assert!(!made.image.usage.contains(ImageUsage::HOST_TRANSFER));
+        assert_eq!(made.memory.required, M::DEVICE_LOCAL);
+    }
+    // No CPU call reaches a combined format's texels: blits copy each
+    // aspect.
+    assert_eq!(
+        plan(PixelFormat::Depth32FloatStencil8, 1)
+            .unwrap()
+            .cpu_access,
+        CpuAccess::None
+    );
+    // Nor does any CPU call reach a multisample texture's, as Chess's
+    // shared 4x Depth32Float attachment and a shared multisample color
+    // target are made.
+    for format in [PixelFormat::Depth32Float, PixelFormat::Rgba8Unorm] {
+        let made = plan(format, 4).unwrap();
+        assert_eq!(made.cpu_access, CpuAccess::None, "{format:?}");
+        assert!(!made.image.usage.contains(ImageUsage::HOST_TRANSFER));
+    }
 }
 
 #[test]

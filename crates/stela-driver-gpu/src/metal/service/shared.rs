@@ -227,6 +227,8 @@ struct Parked {
     operation: u32,
     request: u64,
     key: [u8; 32],
+    /// When it was first answered `Pending`, in the platform's ticks.
+    at: u64,
 }
 
 /// More calls than wait at once; the oldest is forgotten, and asks again.
@@ -243,11 +245,18 @@ pub struct JobReport {
     /// one step.
     pub slices: u64,
     pub longest_slice: u64,
-    /// From queueing to running, the longest.
+    /// From queueing to running, the longest and the total over `ran`.
     pub longest_queued: u64,
+    pub queued: u64,
     /// Calls answered `Pending`, with a turn and without one.
     pub deferred: u64,
     pub repeated: u64,
+    /// Parked calls made again after their job ran: how many, and from
+    /// their first `Pending` to that call, the total and the longest. The
+    /// time a guest thread waited for its job.
+    pub resumed: u64,
+    pub resumed_after: u64,
+    pub longest_resumed_after: u64,
 }
 
 /// The operation [`Served`] names for the kext's import of wired memory,
@@ -434,6 +443,12 @@ pub struct ServiceHost {
     /// Told what the kext found of the Metal plugin, which the platform's
     /// boot decides on: the plugin is the boot's.
     pub bundle: fn(BundleReport),
+    /// Told that a call answered `Pending` waits for a job no processor has
+    /// started: when it parks on the job, and each time it is made again
+    /// while the job stays queued. The platform may call an idle processor
+    /// to start it ([`SharedService::run_job`]) rather than leave it to the
+    /// next one that looks.
+    pub job_waiting: fn(),
 }
 
 /// A guest call the gate served, in the platform's ticks: the PE that rang
@@ -985,6 +1000,7 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
             report.longest = report.longest.max(ticks);
             report.slices += slices;
             report.longest_queued = report.longest_queued.max(waited);
+            report.queued += waited;
         });
     }
 
@@ -1088,6 +1104,11 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
             .with(|jobs| !jobs.queued.is_empty() || jobs.active.is_some())
     }
 
+    /// Whether a job waits in the queue for a processor to start it.
+    pub fn job_queued(&self) -> bool {
+        self.jobs.with(|jobs| !jobs.queued.is_empty())
+    }
+
     /// Whether a job ran a slice and waits to be resumed.
     pub fn job_between_slices(&self) -> bool {
         self.jobs.with(|jobs| jobs.active.is_some())
@@ -1122,6 +1143,7 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
         let Some(call) = read_call(record, caller) else {
             return false;
         };
+        let mut unstarted = false;
         let pending = self.jobs.with(|jobs| {
             let at = jobs.parked.iter().position(|parked| {
                 (
@@ -1136,16 +1158,27 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
                     call.request.address,
                 )
             })?;
-            let key = jobs.parked[at].key;
+            let Parked { key, at: since, .. } = jobs.parked[at];
             let waits =
                 jobs.running == Some(key) || jobs.queued.iter().any(|(job, _)| job.key == key);
             if waits {
                 jobs.report.repeated += 1;
+                unstarted = !jobs.queued.is_empty();
             } else {
                 jobs.parked.remove(at);
+                let report = &mut jobs.report;
+                // Read only here: a call that parked nothing reads the
+                // clock as it rings, enters and leaves, no more.
+                let after = (self.host.ticks)().wrapping_sub(since);
+                report.resumed += 1;
+                report.resumed_after += after;
+                report.longest_resumed_after = report.longest_resumed_after.max(after);
             }
             Some(waits)
         });
+        if unstarted {
+            (self.host.job_waiting)();
+        }
         if pending != Some(true) {
             return false;
         }
@@ -1308,16 +1341,17 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
     /// run one at a time, oldest first.
     fn park(&self, connection: NonZeroU64, record: u64, call: GateCall, jobs: Vec<Job>) {
         let keys: Vec<[u8; 32]> = jobs.iter().map(|job| job.key).collect();
+        let now = (self.host.ticks)();
         let mut parked = Parked {
             connection: connection.get(),
             record,
             operation: call.operation,
             request: call.request.address,
             key: keys[0],
+            at: now,
         };
-        let now = (self.host.ticks)();
         let new = jobs;
-        let unwanted = self.jobs.with(|jobs| {
+        let (unwanted, unstarted) = self.jobs.with(|jobs| {
             jobs.report.deferred += 1;
             jobs.parked.retain(|other| {
                 (other.connection, other.record) != (parked.connection, parked.record)
@@ -1347,10 +1381,13 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
                 parked.key = running;
             }
             jobs.parked.push_back(parked);
-            unwanted
+            (unwanted, !jobs.queued.is_empty())
         });
         // Dropped outside the lock: a job frees what it holds.
         drop(unwanted);
+        if unstarted {
+            (self.host.job_waiting)();
+        }
     }
 
     /// The compiler's counts, unless a call holds the service now.
@@ -2109,6 +2146,7 @@ mod tests {
         served: |_| {},
         wake: || {},
         bundle: |_| {},
+        job_waiting: || {},
     };
 
     fn shared() -> SharedService<MockBackend, crate::metal::device::fixture::MockCompiler> {

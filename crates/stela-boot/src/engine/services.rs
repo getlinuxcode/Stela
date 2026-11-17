@@ -415,8 +415,8 @@ unsafe impl NativeServices for Services<'_> {
             Some(at) => at,
             None => {
                 // SAFETY: probe owns the device whose `_CRS` names the span.
-                let root =
-                    unsafe { self.mmio.claim_platform(pages) }.map_err(ServiceError::Mapping)?;
+                let root = unsafe { self.mmio.claim_platform_broker(pages) }
+                    .map_err(ServiceError::Mapping)?;
                 // SAFETY: the broker is the only suballocator of the window,
                 // which the aperture reserved outside RAM after EBS.
                 let broker =

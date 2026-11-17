@@ -208,9 +208,16 @@ pub struct Service {
     pub release: unsafe extern "C" fn(*mut c_void),
     /// `stela_metal_buffer_reads`.
     pub buffer_reads: unsafe extern "C" fn(*const c_void) -> u32,
-    /// The Vulkan driver's `nir_shader_compiler_options`.
-    pub nir_options: NonNull<c_void>,
+    /// The Vulkan driver's `nir_shader_compiler_options` for each stage,
+    /// indexed by Mesa's `mesa_shader_stage` from vertex to mesh.
+    pub nir_options: [NonNull<c_void>; NIR_STAGES],
 }
+
+/// The stages a device's shaders take, Mesa's `mesa_shader_stage` from
+/// vertex (0) to mesh (7), which index [`Service::nir_options`].
+pub const NIR_STAGES: usize = 8;
+/// Mesa's `MESA_SHADER_COMPUTE`, the stage of the device's internal kernels.
+pub const COMPUTE_STAGE: usize = 5;
 
 /// One of the device's internal kernels' builders (`metal_abi.h`).
 pub type KernelBuilder = unsafe extern "C" fn(*const c_void) -> *mut c_void;
@@ -243,7 +250,7 @@ impl Service {
         for (code, build) in kernels.code.iter_mut().zip(builders) {
             // SAFETY: the caller guarantees the builder and the options it
             // reads.
-            let shader = unsafe { build(self.nir_options.as_ptr()) };
+            let shader = unsafe { build(self.nir_options[COMPUTE_STAGE].as_ptr()) };
             if shader.is_null() {
                 return Err(Error::OutOfMemory);
             }
@@ -344,7 +351,16 @@ pub struct AirCompiler {
     /// recalled.
     restored: u64,
     recalled: u64,
+    /// The keys the service compiled this boot, and its compilations of a
+    /// key it had compiled before: NIR the cache evicted that neither an
+    /// earlier boot's store nor this boot's recall held.
+    compiled_keys: alloc::collections::BTreeSet<[u8; 32]>,
+    recompiled: u64,
 }
+
+/// Keys [`AirCompiler::compiled_keys`] remembers; past this it forgets them
+/// all, which only undercounts `recompiled` for a while.
+const COMPILED_KEYS: usize = 1 << 14;
 
 /// Where a compilation's serialized NIR goes for the next boot, by key.
 pub type Persist = fn(&[u8; 32], &[u8]);
@@ -394,7 +410,9 @@ impl AirCompiler {
             .max_vertex_output_components
             .min(limits.max_fragment_input_components);
         let target = ffi::Target {
-            nir: service.nir_options.as_ptr(),
+            nir: service
+                .nir_options
+                .map(|options| options.as_ptr().cast_const()),
             max_instructions: MAX_INSTRUCTIONS,
             // NAK sizes shared memory in 16 bits.
             max_threadgroup_bytes: limits.max_compute_shared_memory_size.min(u16::MAX.into()),
@@ -448,6 +466,23 @@ impl AirCompiler {
             recall: None,
             restored: 0,
             recalled: 0,
+            compiled_keys: alloc::collections::BTreeSet::new(),
+            recompiled: 0,
+        }
+    }
+
+    /// Counts a compilation the service ran for `key`, and whether it had
+    /// compiled that key before this boot.
+    fn note_compiled(&mut self, key: Option<[u8; 32]>) {
+        self.compiled += 1;
+        let Some(key) = key else {
+            return;
+        };
+        if self.compiled_keys.len() >= COMPILED_KEYS {
+            self.compiled_keys.clear();
+        }
+        if !self.compiled_keys.insert(key) {
+            self.recompiled += 1;
         }
     }
 
@@ -492,7 +527,7 @@ impl AirCompiler {
     /// make.
     fn restore(&mut self, job: &CompileJob) -> Option<(CompiledShader, usize)> {
         let (blob, recalled) = self.serialized(&job.key?)?;
-        let shader = deserialize(&blob, self.target.nir)?;
+        let shader = deserialize(&blob, &self.target)?;
         if recalled {
             self.recalled += 1;
         } else {
@@ -558,7 +593,7 @@ impl AirCompiler {
         match restored {
             Some(false) => self.restored += 1,
             Some(true) => self.recalled += 1,
-            None => self.compiled += 1,
+            None => self.note_compiled(Some(key)),
         }
         self.keep_serialized(&key, serialized.as_deref());
         let Some(nir) = self.nir.as_mut() else {
@@ -662,10 +697,11 @@ impl AirCompiler {
 
     /// `GPU COMPILER reflected=… reflections=… nir_hits=… nir_misses=…
     /// compiled=… restored=…/stored deferred=… nir=entries/MiB evicted=…
-    /// recalled=…`, since the device opened: reflections and compilations
+    /// recalled=… recompiled=…`, since the device opened: reflections and compilations
     /// the service ran, cache hits and misses, stored NIR deserialized of
     /// what the store held, calls that compiled outside the lock, the cache,
-    /// and evicted compilations of this boot deserialized again.
+    /// evicted compilations of this boot deserialized again, and
+    /// compilations of a key the service had compiled before this boot.
     pub fn report(&self) -> String {
         let (hits, misses, entries, bytes, evicted) =
             self.nir.as_ref().map_or((0, 0, 0, 0, 0), |nir| {
@@ -680,7 +716,7 @@ impl AirCompiler {
         alloc::format!(
             "GPU COMPILER reflected={} reflections={} nir_hits={hits} nir_misses={misses} \
              compiled={} restored={}/{} deferred={} nir={entries}/{}M evicted={evicted} \
-             recalled={}",
+             recalled={} recompiled={}",
             self.reflected,
             self.reflections.as_ref().map_or(0, ReflectionCache::len),
             self.compiled,
@@ -689,6 +725,7 @@ impl AirCompiler {
             self.deferrals,
             bytes >> 20,
             self.recalled,
+            self.recompiled,
         )
     }
 
@@ -1314,7 +1351,7 @@ impl AirCompiler {
             let _held = self.lock.hold(self.relax);
             job.run()
         };
-        self.compiled += 1;
+        self.note_compiled(job.key);
         match result {
             Ok((shader, bytes)) => {
                 if let Some(key) = job.key
@@ -1486,6 +1523,12 @@ impl AirCompiler {
                 );
             }
             hasher.update(alloc::format!("{names:?}").as_bytes());
+            // The target's limits shape the NIR too, and a build may change
+            // them without changing the compiler archive that keys the
+            // store: NIR an earlier build stored under others is not read.
+            for limit in target_limits(&self.target) {
+                hasher.update(limit.to_le_bytes());
+            }
             let digest: [u8; 32] = hasher.finalize().into();
             digest
         });
@@ -1724,7 +1767,7 @@ impl CompileJob {
             (None, Some(recall)) => (Cow::Owned(recall(&self.key?)?), true),
             (None, None) => return None,
         };
-        let shader = deserialize(&blob, self.target.nir)?;
+        let shader = deserialize(&blob, &self.target)?;
         Some((self.finish(shader), recalled))
     }
 
@@ -1904,25 +1947,47 @@ struct Blob {
 }
 
 #[cfg(all(feature = "metal-linked", target_os = "uefi"))]
-#[repr(C)]
-struct BlobReader {
-    data: *const u8,
-    end: *const u8,
-    current: *const u8,
-    overrun: bool,
-}
-
-#[cfg(all(feature = "metal-linked", target_os = "uefi"))]
 unsafe extern "C" {
     fn blob_init(blob: *mut Blob);
-    fn blob_reader_init(reader: *mut BlobReader, data: *const c_void, size: usize);
     fn nir_serialize(blob: *mut Blob, shader: *const c_void, strip: bool);
-    fn nir_deserialize(
-        context: *mut c_void,
-        options: *const c_void,
-        reader: *mut BlobReader,
+    fn stela_metal_deserialize(
+        data: *const c_void,
+        size: usize,
+        target: *const ffi::Target,
     ) -> *mut c_void;
     fn free(pointer: *mut c_void);
+}
+
+/// Every limit of `target`, which the NIR it compiles depends on, in the
+/// order of its fields; the driver's NIR options are keyed by its build.
+fn target_limits(target: &ffi::Target) -> [u32; 11] {
+    let ffi::Target {
+        nir: _,
+        max_instructions,
+        max_threadgroup_bytes,
+        max_private_bytes,
+        max_constant_bytes,
+        max_varying_slots,
+        max_payload_bytes,
+        max_mesh_vertices,
+        max_mesh_primitives,
+        stencil_export,
+        raster_order_groups,
+        fragment_tests,
+    } = *target;
+    [
+        max_instructions,
+        max_threadgroup_bytes,
+        max_private_bytes,
+        max_constant_bytes,
+        max_varying_slots,
+        max_payload_bytes,
+        max_mesh_vertices,
+        max_mesh_primitives,
+        stencil_export,
+        raster_order_groups,
+        fragment_tests,
+    ]
 }
 
 /// Whether this image serializes NIR: the linked Mesa does.
@@ -1964,35 +2029,19 @@ fn serialize(code: ShaderCode) -> Option<Vec<u8>> {
     }
 }
 
-/// The NIR `blob` serialized, compiled for the driver's `options`.
-fn deserialize(blob: &[u8], options: *const c_void) -> Option<*mut c_void> {
+/// The NIR `blob` serialized, with the driver's options for its stage
+/// (`stela_metal_deserialize`).
+fn deserialize(blob: &[u8], target: &ffi::Target) -> Option<*mut c_void> {
     #[cfg(all(feature = "metal-linked", target_os = "uefi"))]
     {
-        let mut reader = BlobReader {
-            data: ptr::null(),
-            end: ptr::null(),
-            current: ptr::null(),
-            overrun: false,
-        };
-        // SAFETY: the stored bytes outlive the read, and the options are the
-        // driver's, as the compiler's own NIR is made with.
-        let shader = unsafe {
-            blob_reader_init(&mut reader, blob.as_ptr().cast(), blob.len());
-            nir_deserialize(ptr::null_mut(), options, &mut reader)
-        };
-        if shader.is_null() {
-            return None;
-        }
-        if reader.overrun || reader.current != reader.end {
-            // SAFETY: the deserialized shader, a ralloc context of its own.
-            unsafe { free_nir(shader) };
-            return None;
-        }
-        Some(shader)
+        // SAFETY: the stored bytes outlive the read, and the target holds the
+        // driver's options, as the compiler's own NIR is made with.
+        let shader = unsafe { stela_metal_deserialize(blob.as_ptr().cast(), blob.len(), target) };
+        (!shader.is_null()).then_some(shader)
     }
     #[cfg(not(all(feature = "metal-linked", target_os = "uefi")))]
     {
-        let _ = options;
+        let _ = target;
         #[cfg(test)]
         return cache_tests::deserialize(blob);
         #[cfg(not(test))]
@@ -2001,16 +2050,6 @@ fn deserialize(blob: &[u8], options: *const c_void) -> Option<*mut c_void> {
             None
         }
     }
-}
-
-/// Frees NIR deserialized here.
-#[cfg(all(feature = "metal-linked", target_os = "uefi"))]
-unsafe fn free_nir(shader: *mut c_void) {
-    unsafe extern "C" {
-        fn ralloc_free(context: *mut c_void);
-    }
-    // SAFETY: the caller's shader, which nothing else holds.
-    unsafe { ralloc_free(shader) }
 }
 
 /// The bytes `shader`'s NIR takes, for the cache's budget.

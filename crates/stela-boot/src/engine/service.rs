@@ -368,6 +368,7 @@ impl Service {
         if let Some(network) = network.as_mut().filter(|_| due(NETWORK, true, &mut turn)) {
             // The host adapter's sends and receives wait outside the
             // devices' lock, which every PE's device accesses take.
+            let carrier = network.carrier();
             let (frames, status, room) = devices.with(|devices| {
                 let frames = network.queued(devices);
                 (frames, devices.network_status(), devices.network_room())
@@ -375,7 +376,12 @@ impl Service {
             network.status(status);
             let reusable = network.transmit(frames);
             network.receive(room);
+            // Served, as a received frame is: a carrier change is a
+            // notification the guest's controller must pick up.
             devices.serve(|devices| {
+                if let Some(carrier) = carrier {
+                    devices.network_carrier(carrier);
+                }
                 if let Some(frame) = reusable {
                     devices.network_recycle(frame);
                 }
@@ -462,7 +468,7 @@ impl Service {
             {
                 output::arguments(format_args!("{line}\n"));
             }
-            if let Some(network) = network.as_ref() {
+            if let Some(network) = network.as_mut() {
                 network.report();
             }
             power.disks().report(*tsc_hz);

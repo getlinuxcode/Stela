@@ -861,8 +861,9 @@ impl<C: ConfigSpace> Function<C> {
     }
     /// The function-local reset Linux `pci_reset_function` would pick, from
     /// the ones offered here: FLR, then a D3hot to D0 power management reset
-    /// when the function is in D0 and No_Soft_Reset is clear. None when it
-    /// has neither. Reads only.
+    /// when the function is in D0, No_Soft_Reset is clear and that
+    /// transition resets the function ([`Self::power_reset_resets`]). None
+    /// when it has neither. Reads only.
     pub fn reset_method(&self) -> Result<Option<ResetMethod>, BlockError> {
         Ok(self.method()?.map(Method::public))
     }
@@ -910,11 +911,30 @@ impl<C: ConfigSpace> Function<C> {
             }
             // `pci_pm_reset` refuses a function outside D0 or one whose
             // D3hot exit keeps its state.
-            if control & (PM_STATE | PM_NO_SOFT_RESET) == 0 {
+            if control & (PM_STATE | PM_NO_SOFT_RESET) == 0 && self.power_reset_resets() {
                 return Ok(Some(Method::PowerManagement { power }));
             }
         }
         Ok(None)
+    }
+    /// Whether a D3hot to D0 transition resets the function when it
+    /// advertises that it does (No_Soft_Reset clear). Linux's
+    /// `quirk_no_pm_reset` names the functions where it does not: every
+    /// AMD/ATI VGA function, which keeps its framebuffer contents and
+    /// monitor sync through it, and four Mellanox switch functions, which
+    /// stay operational. Linux still takes that transition on a root bus, as
+    /// better than nothing; here a reset that resets nothing is no reset, on
+    /// any bus, so a caller that needs one learns that it has none.
+    pub fn power_reset_resets(&self) -> bool {
+        const ATI: u16 = 0x1002;
+        const MELLANOX: u16 = 0x15b3;
+        const VGA: [u8; 2] = [3, 0];
+        let ineffective = match self.vendor {
+            ATI => self.class[..2] == VGA,
+            MELLANOX => [0xcb84, 0xcf6c, 0xcf70, 0xcf80].contains(&self.device),
+            _ => false,
+        };
+        !ineffective
     }
     /// `pci_dev_save_and_disable`, the reset, `pci_dev_wait` and
     /// `pci_dev_restore`, for either method.

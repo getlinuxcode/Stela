@@ -596,10 +596,18 @@ pub struct Counts {
     /// Its stamped transfers ([`chain::StampCount`]'s order), the exits it
     /// gave a stamped tail, how many exits had one when it last looked, then
     /// the PAC branch exits it gave a predicted tail and its probe
-    /// transfers ([`super::Statistics::lookup_hits`]).
-    pub stamped: [u64; chain::STAMP_COUNTS + 4],
+    /// transfers ([`super::Statistics::lookup_hits`]), its cell probe
+    /// transfers, and the cells held, those past the stamped ones and those
+    /// holding no entry when it last looked, then the hot exits promotion
+    /// left waiting, the cell samples it read and the hot exits it found
+    /// no free stamped cell for ([`super::Statistics::cell_probes`] on).
+    pub stamped: [u64; chain::STAMP_COUNTS + 11],
+    /// What its paired frames did since boot ([`chain::PairCount`]'s order).
+    pub pairs: [u64; chain::PAIR_COUNTS],
     /// PAC results its service computed since boot, each a memo miss.
     pub pac_fills: u64,
+    /// Its PAC census under step timing ([`step_timing::PAC_CENSUS_WORDS`]).
+    pub pac_census: [u64; step_timing::PAC_CENSUS_WORDS],
     /// TSC ticks in each engine phase ([`step_timing::Phase`]), while
     /// step timing is enabled.
     pub phases: [u64; step_timing::Phase::COUNT],
@@ -814,6 +822,12 @@ impl Hub {
     /// last call ([`SharedClock::take_stalled`]).
     pub fn clock_stalled(&self) -> u64 {
         self.clock.take_stalled()
+    }
+
+    /// Host counts of those a lease held while a kernel spin was old,
+    /// since the last call ([`SharedClock::take_leased`]).
+    pub fn clock_leased(&self) -> u64 {
+        self.clock.take_leased()
     }
 
     /// Host counts the count now lags the host's by, and the counts the
@@ -1094,6 +1108,20 @@ impl Hub {
         self.inboxes[pe].host_call.store(true, Ordering::SeqCst);
         self.interrupt(pe);
         self.wake(pe);
+    }
+
+    /// The host has work for an idle core, such as a job a guest call waits
+    /// for: a PE other than `skip` that sleeps waiting for an interrupt is
+    /// called ([`Self::call_host`]), so its wait ends and it serves the host
+    /// at once. A sleeping PE wakes only for its guest or the host's
+    /// service, so without this the work waits for the next PE that stops
+    /// to wait. Whether one was called; with none asleep, the work waits.
+    pub fn call_sleeping_server(&self, skip: usize) -> bool {
+        let Some(pe) = self.sleeping_server(skip) else {
+            return false;
+        };
+        self.call_host(pe);
+        true
     }
 
     /// Whether the host needs PE `pe`'s core; once for each call.
@@ -1540,6 +1568,16 @@ impl Hub {
         self.inboxes
             .get(home)
             .is_some_and(|inbox| inbox.outside.load(Ordering::Acquire))
+    }
+
+    /// Whether the home machine is outside its run loop at work of its own
+    /// (serving the host, compiling, a report), not asleep: a wake would
+    /// not reach it until that work ends.
+    pub(super) fn home_busy_outside(&self) -> bool {
+        let home = self.home.load(Ordering::Acquire);
+        self.inboxes.get(home).is_some_and(|inbox| {
+            inbox.outside.load(Ordering::Acquire) && !inbox.sleeping.load(Ordering::SeqCst)
+        })
     }
 
     /// The counts in a millisecond of the count every PE reads.
@@ -2651,15 +2689,28 @@ impl<H: Host, D: Devices> Machine<H, D> {
             transition_misses: statistics.transition_misses,
             branch_misses: statistics.branch_misses,
             stamped: {
-                let mut stamped = [0; chain::STAMP_COUNTS + 4];
+                let mut stamped = [0; chain::STAMP_COUNTS + 11];
                 stamped[..chain::STAMP_COUNTS].copy_from_slice(&self.chain.stamp_counts());
                 stamped[chain::STAMP_COUNTS] = statistics.stamped_tails;
                 stamped[chain::STAMP_COUNTS + 1] = statistics.stamped_in_use;
                 stamped[chain::STAMP_COUNTS + 2] = statistics.predicted_tails;
                 stamped[chain::STAMP_COUNTS + 3] = statistics.lookup_hits;
+                stamped[chain::STAMP_COUNTS + 4] = statistics.cell_probes;
+                stamped[chain::STAMP_COUNTS + 5] = statistics.cells_live;
+                stamped[chain::STAMP_COUNTS + 6] = statistics.cells_past;
+                stamped[chain::STAMP_COUNTS + 7] = statistics.cells_empty;
+                stamped[chain::STAMP_COUNTS + 8] = statistics.promotions_waiting;
+                stamped[chain::STAMP_COUNTS + 9] = statistics.cell_samples;
+                stamped[chain::STAMP_COUNTS + 10] = statistics.promotions_full;
                 stamped
             },
+            pairs: self.chain.pairs(),
             pac_fills: self.pointer.fills,
+            pac_census: self
+                .pointer
+                .census
+                .as_ref()
+                .map_or([0; step_timing::PAC_CENSUS_WORDS], |census| census.words()),
             phases: self
                 .step_timing
                 .as_ref()

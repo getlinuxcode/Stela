@@ -334,8 +334,9 @@ extern "sysv64" fn terminal_interrupt(frame: *mut Frame, image: *const u8) -> ! 
     saved_state::terminal(frame, image)
 }
 
-// The NMI gate: an NMI a TLB shootdown sent (`native_mmio::shootdown`) is
-// answered and returns; any other goes on to vector 2's terminal stub with
+// The NMI gate: an NMI a `--profile` counter overflow (`host::sampling`) or
+// a TLB shootdown sent (`native_mmio::shootdown`) is answered and returns;
+// any other goes on to vector 2's terminal stub with
 // the stack as the processor left it. The answer runs soft-float Rust that
 // takes no lock and touches no extended state, on the NMI's own stack, so it
 // saves only the registers the call may clobber. The processor's frame
@@ -355,6 +356,7 @@ stela_nmi_gate:
     push r11
     cld
     mov rdi, [rsp + 72]
+    mov rsi, [rsp + 96]
     call {answer}
     test al, al
     pop r11
@@ -372,23 +374,21 @@ stela_nmi_gate:
     answer = sym nmi_answer,
 );
 
-/// Whether the NMI at `rip` was a shootdown's, now answered: the gate then
-/// returns. The step watchdog's keeps its stop even when a shootdown's came
-/// with it, as two NMIs pending at once are taken as one. On a processor
-/// already in a terminal handler, which no retirement sends one to, an NMI
-/// (a platform's, or the step watchdog's for the step the handler
-/// interrupted) returns too: that handler's stop goes on and keeps its
-/// reason, where the NMI's terminal stub would find the terminal entry slot
-/// in use and halt.
-extern "sysv64" fn nmi_answer(rip: u64) -> bool {
+/// Whether the NMI at `rip`, the interrupted stack at `rsp`, was owed by a
+/// `--profile` counter overflow ([`host::sampling::overflow`]), now
+/// sampled, or by a retirement's NMI, now answered
+/// (`native_mmio::shootdown::gate`): the gate then returns. The step
+/// watchdog's keeps its stop. On a processor already in a terminal handler,
+/// which no retirement sends one to, an NMI (a platform's, or the step
+/// watchdog's for the step the handler interrupted) returns too: that
+/// handler's stop goes on and keeps its reason, where the NMI's terminal
+/// stub would find the terminal entry slot in use and halt.
+extern "sysv64" fn nmi_answer(rip: u64, rsp: u64) -> bool {
+    let fired = host::sampling::overflow(rip, rsp);
     if crate::native_mmio::shootdown::terminal_here() {
         return true;
     }
-    if !crate::native_mmio::shootdown::take_poke() || super::step_watchdog::nmi_is_watchdog() {
-        return false;
-    }
-    crate::native_mmio::shootdown::answer_nmi(rip);
-    true
+    crate::native_mmio::shootdown::gate(fired, rip, super::step_watchdog::nmi_is_watchdog)
 }
 
 // One stub per vector: push a zero error code when the CPU pushes none,
@@ -809,6 +809,13 @@ pub fn fatal(frame: &Frame) -> ! {
     };
     let machine_check = match frame.vector {
         18 => machine_check(),
+        // What this processor's NMI gate found owed when nothing claimed
+        // the NMI.
+        2 => crate::native_mmio::shootdown::nmi_owed()
+            .map(|(owed, held, marked)| {
+                alloc::format!(" nmi=owed:{owed}/held:{held}/marked:{}", u8::from(marked))
+            })
+            .unwrap_or_default(),
         _ => alloc::string::String::new(),
     };
     // An NMI from the step watchdog's counter: the step it names never

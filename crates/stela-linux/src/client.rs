@@ -29,6 +29,7 @@ unsafe extern "C" {
     fn stela_linux_fd_close(fd: c_int);
     fn stela_linux_fd_dup(fd: c_int) -> c_int;
     fn stela_linux_fd_device(fd: c_int) -> c_long;
+    fn stela_linux_fd_seek(fd: c_int, offset: i64, whence: c_int) -> i64;
     fn stela_linux_ioctl(fd: c_int, request: c_uint, argument: *mut c_void) -> c_long;
     fn stela_linux_map(
         fd: c_int,
@@ -103,6 +104,16 @@ pub unsafe fn duplicate(fd: c_int) -> Errno {
 pub unsafe fn device(fd: c_int) -> i64 {
     // SAFETY: the module's contract.
     unsafe { stela_linux_fd_device(fd) }
+}
+
+/// The descriptor's llseek to `offset` from `whence`: the new offset, or a
+/// negative errno.
+///
+/// # Safety
+/// See the module.
+pub unsafe fn seek(fd: c_int, offset: i64, whence: c_int) -> i64 {
+    // SAFETY: the module's contract.
+    unsafe { stela_linux_fd_seek(fd, offset, whence) }
 }
 
 /// # Safety

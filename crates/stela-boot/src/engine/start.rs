@@ -860,6 +860,18 @@ fn describe_host(
     ));
 }
 
+/// A part of "Setting up the Mac's hardware" begins: named on the log and,
+/// in an image with amdgpu, whose parts may wait on a GPU it is still
+/// bringing up, stored on the USB first. The step stores the log only at its
+/// end, so a part that never returns showed no line of its own: this one
+/// names it. Other images keep the step's single store, whose wait each
+/// part's store would add to every boot.
+fn hardware_step(name: &str) {
+    output::arguments(format_args!("HARDWARE {name}\n"));
+    #[cfg(feature = "amdgpu")]
+    output::flush_log();
+}
+
 fn run_guest(boot: Boot<'_>, mut host: OpenedHost, mut storage: Storage) -> ! {
     let Boot {
         handoff,
@@ -923,6 +935,7 @@ fn run_guest(boot: Boot<'_>, mut host: OpenedHost, mut storage: Storage) -> ! {
     if loaded_tree.is_some() {
         crate::status::begin("Setting up the Mac's hardware");
     }
+    hardware_step("roster");
     let roster = topology::AssignedRoster::new(
         native_processors.expect("validated native roster"),
         &executors,
@@ -959,7 +972,10 @@ fn run_guest(boot: Boot<'_>, mut host: OpenedHost, mut storage: Storage) -> ! {
         ..
     } = storage;
     let mut bare = host_owner.host();
+    hardware_step("assign");
     let mut assigned = assign(boot, &roster, topology_source.as_ref(), &full_profile);
+    #[cfg(feature = "nvk")]
+    hardware_step("gpu-gates");
     #[cfg(feature = "nvk")]
     let gpu_gates = assigned
         .as_mut()
@@ -989,6 +1005,7 @@ fn run_guest(boot: Boot<'_>, mut host: OpenedHost, mut storage: Storage) -> ! {
             ));
         }
     }
+    hardware_step("canonical-ram");
     // SAFETY: all raw guest input copies have ended, AP executors are waiting
     // for their guest contexts, and no guest/device DMA producer has entered.
     // The same loader bytes are for every subsequent native CPU and synchronous device writer.
@@ -1006,8 +1023,10 @@ fn run_guest(boot: Boot<'_>, mut host: OpenedHost, mut storage: Storage) -> ! {
     // ID-register list in `target`.
     #[cfg(feature = "nvk")]
     if let Some(assigned) = &mut assigned {
+        hardware_step("describe-host");
         describe_host(&mut assigned.tree, gpu_gates.len(), canonical_ram.target());
     }
+    hardware_step("board");
     if let Some(assigned) = &assigned {
         board = Some(assigned_board(
             handoff,
@@ -1058,6 +1077,7 @@ fn run_guest(boot: Boot<'_>, mut host: OpenedHost, mut storage: Storage) -> ! {
     let mut cpu = Cpu::of(profile.chip, entry, Pstate::reset(el));
     cpu.state.x[0] = x0;
     let now = stela_engine::machine::Host::counter(&mut bare);
+    hardware_step("place-devices");
     let Placed {
         mut devices,
         restore_usb,
@@ -1084,6 +1104,8 @@ fn run_guest(boot: Boot<'_>, mut host: OpenedHost, mut storage: Storage) -> ! {
         tree,
     );
     #[cfg(feature = "nvk")]
+    hardware_step("add-gpu-gates");
+    #[cfg(feature = "nvk")]
     if let Some(board) = &board {
         for (placement, service) in gpu_gates {
             // The board's AIC took its dies and inputs from this vector too.
@@ -1100,6 +1122,7 @@ fn run_guest(boot: Boot<'_>, mut host: OpenedHost, mut storage: Storage) -> ! {
     // Device placement has copied the carried firmware. This function
     // never returns, so release the remaining input buffers here.
     drop(built);
+    hardware_step("processor-power");
     let processor_power = connect_processor_power(
         &mut devices,
         topology_source.as_ref(),
@@ -1443,9 +1466,13 @@ fn open_gpus(
     work: &'static kernel_work::KernelWork,
     mmio: Option<&'static crate::native_mmio::Source>,
     remappers: &'static remapping::Remappers,
+    acpi: Option<&'static aml::HostAcpi>,
     handoff: &Handoff,
     firmware: &Option<alloc::sync::Arc<stela_drivers::firmware::Catalog>>,
-    adapters: Vec<stela_drivers::gpu::Adapter>,
+    (adapters, isa_bridges): (
+        Vec<stela_drivers::gpu::Adapter>,
+        Vec<stela_drivers::probe::IsaBridge>,
+    ),
 ) -> bool {
     let heap = handoff.heap.physical..handoff.heap.physical + handoff.heap.bytes;
     let guest_ram = handoff.guest[..handoff.guest_count]
@@ -1453,17 +1480,11 @@ fn open_gpus(
         .map(|region| region.physical..region.physical + region.bytes)
         .collect();
     let Some(window) = mmio.and_then(|mmio| mmio.window()) else {
-        // AMD fork: in the serial log too, which a GPU trial reads.
-        output::arguments(format_args!(
-            "GPU not started: no page window (native MMIO {})\n",
-            if mmio.is_some() { "present" } else { "absent" }
-        ));
         crate::status::warn("this PC cannot map a GPU's memory, so it is left unused");
         return false;
     };
     let Some(mmio) = mmio else { return false };
     if let Err(error) = work.service_clock().and_then(|clock| clock.epoch()) {
-        output::arguments(format_args!("GPU not started: no service clock: {error}\n"));
         crate::status::warn(&stela_boot_core::work_status::gpu_without_clock(
             crate::cpu::INVARIANT_TSC.present(),
             &format!("{error}"),
@@ -1484,13 +1505,15 @@ fn open_gpus(
     let found = adapters.clone();
     let claiming = host::rdtsc();
     let claimed = work.call_owned(60_000_000, move || {
-        let services = services::Services::new(mmio, remappers, None, heap, tsc_hz, Vec::new())
+        // The firmware's memory is read through the ACPI owner: a GPU's
+        // configuration may point at a table there.
+        let services = services::Services::new(mmio, remappers, acpi, heap, tsc_hz, Vec::new())
             .with_guest_ram(guest_ram);
         let random = stela_drivers::probe::NativeServices::entropy(&services)
             .ok()
             .and_then(|entropy| stela_linux::random::Seeded::from_entropy(&*entropy).ok());
         let (claimed, refused) = random.as_ref().map_or_else(Default::default, |_| {
-            gpu::claim_all(&services, &adapters, gop, firmware.as_ref())
+            gpu::claim_all(&services, &adapters, &isa_bridges, gop, firmware.as_ref())
         });
         (claimed, refused, random)
     });
@@ -1503,6 +1526,7 @@ fn open_gpus(
                 None => crate::status::warn(&gpu_status::none(&found)),
                 Some((first, rest)) => {
                     crate::status::warn(&gpu_status::refused(
+                        first.vendor,
                         &first.address,
                         first.device,
                         first.reason,
@@ -1510,6 +1534,7 @@ fn open_gpus(
                     ));
                     for gpu in rest {
                         crate::status::info(&gpu_status::refused(
+                            gpu.vendor,
                             &gpu.address,
                             gpu.device,
                             gpu.reason,
@@ -1518,11 +1543,14 @@ fn open_gpus(
                     }
                 }
             }
-            // The display adapters Stela's GPU driver does not run, and why.
-            for adapter in found
-                .iter()
-                .filter(|adapter| adapter.vendor != stela_drivers::gpu::Vendor::Nvidia)
-            {
+            // The display adapters no driver here runs, and why: the
+            // refused ones were named above.
+            for adapter in found.iter().filter(|adapter| {
+                stela_drivers::gpu::stack::GpuStack::select(adapter).is_err()
+                    && !refused
+                        .iter()
+                        .any(|gpu| gpu.address == format!("{}", adapter.address))
+            }) {
                 crate::status::info(&gpu_status::unused(adapter));
             }
             return false;
@@ -1551,8 +1579,8 @@ fn open_gpus(
     // A stop inside the start stores the USB's log from there.
     let opened = storage::in_gpu_start(|| gpu::open(machine, claimed));
     // `GPU START claim_ms=… linux_ms=… probe_ms=… total_ms=…`: claiming the
-    // functions, starting Linux, and nouveau's probe, which boots the GSP
-    // and binds DRM.
+    // functions, starting Linux, and the drivers' probe: nouveau's boots the
+    // GSP and binds DRM.
     let ms = |ticks: u64| ticks / (tsc_hz / 1000).max(1);
     let (linux, probe) = gpu::start_times();
     output::arguments(format_args!(
@@ -1562,7 +1590,7 @@ fn open_gpus(
         ms(probe),
         ms(host::rdtsc().wrapping_sub(claiming)),
     ));
-    match opened {
+    let ok = match opened {
         Ok(()) => {
             crate::status::done("started");
             true
@@ -1574,7 +1602,12 @@ fn open_gpus(
             ));
             false
         }
-    }
+    };
+    // The start's last lines and its result go on the stick now, outside the
+    // start, rather than at the next periodic store: a stop in what follows
+    // keeps them.
+    output::flush_log();
+    ok
 }
 
 /// What the board's devices are placed from besides the board itself.
@@ -1659,6 +1692,18 @@ fn place_devices(
                     as alloc::boxed::Box<dyn stela_soc::machine::Scanout>
             })
     };
+    // amdgpu retired the firmware's screen to claim its GPU and gave no
+    // display in its place; the Mac keeps a monitor at that screen's mode.
+    let headless_scanout = || {
+        handoff.screen.map(|screen| {
+            let (width, height) = screen.resolution();
+            output::arguments(format_args!(
+                "DISPLAY headless scanout {width}x{height}: the firmware's screen was retired for the GPU\n"
+            ));
+            alloc::boxed::Box::new(display::HeadlessScanout::new(width, height))
+                as alloc::boxed::Box<dyn stela_soc::machine::Scanout>
+        })
+    };
     // The firmware's scanout keeps its newest frame itself; a GPU's is
     // wrapped to keep one for `--scanout-mirror`. A bound GPU with no display
     // leaves the firmware's screen on another adapter showing its frames
@@ -1673,12 +1718,16 @@ fn place_devices(
         false => scanout,
     };
     #[cfg(feature = "nvk")]
+    hardware_step("scanout");
+    #[cfg(feature = "nvk")]
     let scanout = gpu::display::scanout()
         .map(mirrored)
         .or_else(|| firmware_scanout(gpu::display::drawn_without_display()))
-        .or_else(|| gpu::display::awaited(handoff.screen).map(mirrored));
+        .or_else(|| gpu::display::awaited(handoff.screen).map(mirrored))
+        .or_else(headless_scanout);
     #[cfg(not(feature = "nvk"))]
-    let scanout = firmware_scanout(false);
+    let scanout = firmware_scanout(false).or_else(headless_scanout);
+    hardware_step("devices");
     let programmed = mount::memory_locks(placement.read_only_region, core_locks);
     let memory = board.and_then(|board| memory_resources(board, canonical_ram, programmed));
     let cacheless_memory = memory.is_some();
@@ -2569,6 +2618,70 @@ fn start_platform(
         Ok(()) => output::arguments(format_args!("NATIVE IRQ device vectors attached\n")),
         Err(error) => output::arguments(format_args!("NATIVE IRQ unavailable: {error:?}\n")),
     }
+    crate::status::progress("clocks");
+    let clock = if options.boots_macos() {
+        // SAFETY: this BSP owns the existing timer/IDT before any driver,
+        // and the HPET only after its whole-controller handoff above.
+        unsafe { service_clock(handoff, host_owner, native_mmio) }
+            .inspect_err(|error| {
+                output::arguments(format_args!(
+                    "NATIVE SERVICE CLOCK unavailable: {error:?}\n"
+                ));
+            })
+            .ok()
+            .map(|clock| &*alloc::boxed::Box::leak(alloc::boxed::Box::new(clock)))
+    } else {
+        None
+    };
+    // SAFETY: validated BSP handoff, before AP/driver producers.
+    let work = match unsafe { kernel_work::KernelWork::prepare(handoff, host_owner, clock) } {
+        Ok(work) => {
+            // SAFETY: the BSP in the engine's root, before the APs start and
+            // before any producer uses its counters or its APIC's entry.
+            unsafe { super::step_watchdog::install(handoff.tsc_hz) };
+            #[cfg(feature = "diagnostics")]
+            output::arguments(format_args!(
+                "NATIVE WORK owned stacks=32 foreground=verified services=unpublished\n"
+            ));
+            Ok(&*alloc::boxed::Box::leak(alloc::boxed::Box::new(work)))
+        }
+        // The record keeps this line until the USB log opens again, which
+        // the devices' start on the boot stack (`start_devices`) reaches.
+        Err(error) => {
+            output::arguments(format_args!("NATIVE WORK unavailable: {error}\n"));
+            Err(error.reason())
+        }
+    };
+    crate::status::progress("ACPI tables");
+    // The step watchdog's stop names this step: its AML calls are bounded
+    // (`aml::bounded`), but an access that never completes is not.
+    static ACPI_TABLES: &str = "the firmware's ACPI tables";
+    super::step_watchdog::stage(&ACPI_TABLES);
+    // Loaded before the PCI census, so PCI ports whose slot power firmware
+    // left off are powered on before it (`pci_power`) and the census sees
+    // what lies below them; hardware mode follows the census.
+    let host_acpi = aml::HostAcpi::start(
+        handoff.rsdp,
+        handoff.root,
+        handoff
+            .storage
+            .handoff()
+            .map(|storage| storage.ecam)
+            .unwrap_or_default(),
+        native_mmio,
+        handoff.tsc_hz,
+        work.as_ref().ok().copied(),
+    );
+    crate::native_idle::install(
+        host_acpi.and_then(|acpi| acpi.processor_idle(crate::native_idle::capabilities())),
+    );
+    if let (Some(acpi), Some(mmio)) = (host_acpi, native_mmio) {
+        crate::status::progress("PCI ports");
+        static PCI_PORTS: &str = "powering on PCI ports through ACPI";
+        super::step_watchdog::stage(&PCI_PORTS);
+        super::pci_power::power_on_ports(acpi, mmio, handoff.tsc_hz);
+    }
+    super::step_watchdog::clear_stage();
     // Retire the configuration census and park the contained function owners
     // before either SCI publication or remapper takeover.
     crate::status::progress("PCI functions");
@@ -2664,6 +2777,9 @@ fn start_platform(
         },
         _ => remapping::Remappers::none(),
     };
+    // SAFETY: before any GPU claim, with the loader root that maps the
+    // ACPI tables, as the remapping units' were read above.
+    unsafe { super::gpu::keep_video_bios_table(handoff.rsdp, handoff.root) };
     // The IOAPICs are the operating system's after ExitBootServices, as
     // every OS takes them: firmware and SMM program no routes at runtime.
     if let Some(pci) = &contained_pci {
@@ -2694,63 +2810,9 @@ fn start_platform(
         }
         _ => None,
     };
-    crate::status::progress("clocks");
-    // AMD fork: a GPU trial (`--gpu-trial`) starts the GPU, which needs it.
-    let clock = if options.boots_macos() || options.gpu_trial {
-        // SAFETY: this BSP owns the existing timer/IDT before any driver,
-        // and the HPET only after its whole-controller handoff above.
-        unsafe { service_clock(handoff, host_owner, native_mmio) }
-            .inspect_err(|error| {
-                output::arguments(format_args!(
-                    "NATIVE SERVICE CLOCK unavailable: {error:?}\n"
-                ));
-            })
-            .ok()
-            .map(|clock| &*alloc::boxed::Box::leak(alloc::boxed::Box::new(clock)))
-    } else {
-        None
-    };
-    // SAFETY: validated BSP handoff, before AP/driver producers.
-    let work = match unsafe { kernel_work::KernelWork::prepare(handoff, host_owner, clock) } {
-        Ok(work) => {
-            // SAFETY: the BSP in the engine's root, before the APs start and
-            // before any producer uses its counters or its APIC's entry.
-            unsafe { super::step_watchdog::install(handoff.tsc_hz) };
-            #[cfg(feature = "diagnostics")]
-            output::arguments(format_args!(
-                "NATIVE WORK owned stacks=32 foreground=verified services=unpublished\n"
-            ));
-            Ok(&*alloc::boxed::Box::leak(alloc::boxed::Box::new(work)))
-        }
-        // The record keeps this line until the USB log opens again, which
-        // the devices' start on the boot stack (`start_devices`) reaches.
-        Err(error) => {
-            output::arguments(format_args!("NATIVE WORK unavailable: {error}\n"));
-            Err(error.reason())
-        }
-    };
-    crate::status::progress("ACPI tables");
-    // The step watchdog's stop names this step: its AML calls are bounded
-    // (`aml::bounded`), but an access that never completes is not.
-    static ACPI_TABLES: &str = "the firmware's ACPI tables";
-    super::step_watchdog::stage(&ACPI_TABLES);
-    let host_acpi = aml::HostAcpi::start(
-        handoff.rsdp,
-        handoff.root,
-        handoff
-            .storage
-            .handoff()
-            .map(|storage| storage.ecam)
-            .unwrap_or_default(),
-        native_mmio,
-        handoff.tsc_hz,
-        prepared_sci,
-        work.as_ref().ok().copied(),
-    );
-    crate::native_idle::install(
-        host_acpi.and_then(|acpi| acpi.processor_idle(crate::native_idle::capabilities())),
-    );
-    super::step_watchdog::clear_stage();
+    if let Some(acpi) = host_acpi {
+        acpi.activate(prepared_sci);
+    }
     crate::status::done("");
     Platform {
         acpi: host_acpi,
@@ -2917,8 +2979,6 @@ fn start_devices(
             && !options.guest_network
             && translation_store.is_none()
             && fdr_partition.is_none()
-            // AMD fork: a GPU trial opens the host's devices, the GPU's too.
-            && !options.gpu_trial
         {
             (
                 Vec::new(),
@@ -3048,6 +3108,7 @@ fn start_devices(
                 mut links,
                 network_account,
                 gpus,
+                isa_bridges,
                 usb,
                 bluetooth: host_controller,
                 usb_disks,
@@ -3096,46 +3157,17 @@ fn start_devices(
                     crate::status::warn(&stela_boot_core::work_status::gpu_without_work(reason));
                 }
             });
-            // AMD fork (J6): a GPU trial starts the GPU's driver without
-            // macOS, and reports how far it got.
-            let (work, gpus) = match work {
-                Ok(work) if options.gpu_trial && !options.boots_macos() => {
-                    #[cfg(feature = "amdgpu")]
-                    gpu::set_amd_trial();
-                    let started = open_gpus(work, mmio, remappers, handoff, host_firmware, gpus);
-                    output::arguments(format_args!("GPU TRIAL started={started}\n"));
-                    // The console moves to the Radeon's screen, and stays
-                    // there long enough for a person at the monitor to read.
-                    #[cfg(feature = "amdgpu")]
-                    if let Some(screen) = gpu::amd_screen() {
-                        crate::status::take_screen(Some(screen));
-                        crate::status::info("Stela's console on the Radeon's screen (GPU trial)");
-                        output::arguments(format_args!("GPU TRIAL console on the Radeon\n"));
-                        // AMD fork (J7): the Metal device over RADV.
-                        #[cfg(feature = "radv")]
-                        {
-                            crate::status::begin("Opening the Metal device on the Radeon");
-                            let opened = gpu::trial_metal();
-                            output::arguments(format_args!("GPU TRIAL metal services={opened}\n"));
-                            if opened > 0 {
-                                crate::status::done("opened over RADV");
-                            } else {
-                                crate::status::warn("refused; the boot log says why");
-                            }
-                        }
-                        let end = host::rdtsc().saturating_add(handoff.tsc_hz.saturating_mul(15));
-                        while host::rdtsc() < end {
-                            core::hint::spin_loop();
-                        }
-                    }
-                    output::flush_log();
-                    (Ok(work), Vec::new())
-                }
-                work => (work, gpus),
-            };
             if options.boots_macos()
                 && let Ok(work) = work
-                && open_gpus(work, mmio, remappers, handoff, host_firmware, gpus)
+                && open_gpus(
+                    work,
+                    mmio,
+                    remappers,
+                    host_acpi,
+                    handoff,
+                    host_firmware,
+                    (gpus, isa_bridges),
+                )
             {
                 let firmware = handoff
                     .screen
@@ -3144,7 +3176,9 @@ fn start_devices(
                 gpu::serve(
                     handoff.screen.map(|screen| screen.resolution()),
                     firmware.as_deref(),
+                    options.display_size,
                 );
+                gpu::panel_brightness(host_acpi);
             }
             disks.profile_callbacks(options.profile);
             if let Some(store) = store {
@@ -3162,12 +3196,13 @@ fn start_devices(
             // run with a host controller or the model, and Setup's Language
             // Chooser then waits for bluetoothd with a black screen. Without
             // a controller bluetoothd restarts and Setup goes on. The host's
-            // controller is released in the loader's root by its drop.
-            if host_controller.is_some() && options.input {
-                output::arguments(format_args!(
-                    "BLUETOOTH UNSUPPORTED the guest gets no controller: macOS does not \
-                     configure the guest's USB Bluetooth controller and its Setup waits for it\n"
-                ));
+            // controller is released in the loader's root by its drop. The
+            // log says so once, with a host controller or without one.
+            if let Some(line) = stela_boot_core::guest_bluetooth::unsupported_line(
+                host_controller.is_some(),
+                options.input,
+            ) {
+                output::arguments(format_args!("{line}"));
             }
             drop(host_controller);
             // With no adapter started, the screen names each one found and
@@ -3195,29 +3230,13 @@ fn start_devices(
                     crate::status::info(&format!("Ethernet adapter not started: {line}."));
                 }
             }
-            // The guest's adapter is its own: the mount's client keeps the
-            // first one. Without one the Mac boots with no network, which
-            // is reported once.
-            let guest_network = options
-                .guest_network
-                .then(|| {
-                    network::GuestNetwork::open(&mut links, wants_network)
-                        .inspect_err(|error| {
-                            output::arguments(format_args!("guest network refusal: {error}\n"));
-                            // Optional: macOS boots without it.
-                            crate::status::info(
-                                "macOS starts without a network: no supported network \
-                                 adapter is free for it",
-                            );
-                        })
-                        .ok()
-                })
-                .flatten();
             // A missing network is reported here and refused only by what
             // needs it, so the mount still boots and logs how far it gets.
+            // The mount's client picks first, from every adapter: an
+            // install needs it, and the guest takes one of the others.
             let network = wants_network.then(|| {
                 crate::status::begin("Getting a network address");
-                network::HostNetwork::open(links, host_clock, handoff, options)
+                network::HostNetwork::open(&mut links, host_clock, handoff, options)
                     .inspect(|network| crate::status::done(network.describe()))
                     .map(|network| network::Shared(Rc::new(RefCell::new(network))))
                     .inspect_err(|error| {
@@ -3230,6 +3249,25 @@ fn start_devices(
                         lines.for_each(crate::status::info);
                     })
             });
+            // The guest's adapter is its own, one the mount's client left.
+            // Without one the Mac boots with no network, which is reported
+            // once. Adapters left over are stopped with `links`.
+            let guest_network = options
+                .guest_network
+                .then(|| {
+                    network::GuestNetwork::open(&mut links)
+                        .inspect_err(|error| {
+                            output::arguments(format_args!("guest network refusal: {error}\n"));
+                            // Optional: macOS boots without it.
+                            crate::status::info(
+                                "macOS starts without a network: no supported network \
+                                 adapter is free for it",
+                            );
+                        })
+                        .ok()
+                })
+                .flatten();
+            drop(links);
             (
                 services,
                 medium,

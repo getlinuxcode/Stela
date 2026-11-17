@@ -1,5 +1,7 @@
 # amdgpu dans Stela (J6)
 
+> **Remplacé par upstream 0.5.0** (17 novembre 2026). Upstream a porté amdgpu et RADV de son côté, et le fork a fusionné sa version. Le code décrit ici (`build/amdgpu.rs` version fork, `src/amd/linux/`, `gpu_amd.rs`, le mode `--gpu-trial`) est retiré. Cette page garde le récit des essais sur la vraie RX 9070 XT, qui valident le même chemin.
+
 Le but : faire démarrer la RX 9070 XT par Stela lui-même, avec le pilote amdgpu de Linux compilé tel quel dans l'environnement Linux de Stela (`stela-linux`). C'est la méthode déjà suivie pour nouveau sur NVIDIA.
 
 ## Où en est le portage (17 novembre 2026)

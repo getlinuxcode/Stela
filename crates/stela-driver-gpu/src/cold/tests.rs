@@ -189,7 +189,6 @@ unsafe impl Timer for PhysicalTimer {
 fn inputs() -> (Inputs<Peer, OldViews>, Rc<RefCell<State>>) {
     inputs_for(0x1234_10de)
 }
-/// A display function with this identity word (device, vendor).
 fn inputs_for(identity: u32) -> (Inputs<Peer, OldViews>, Rc<RefCell<State>>) {
     let state = Rc::new(RefCell::new(State::default()));
     let mut words = [0; 128];
@@ -254,79 +253,6 @@ fn timed_flr_precedes_original_drain_and_unique_bind() {
     }
     kept(&state.borrow());
 }
-/// AMD fork (J6): an RDNA 4 Radeon (Navi 48) takes the same cold handoff.
-#[test]
-fn a_radeon_takes_the_same_cold_handoff() {
-    let (inputs, state) = inputs_for(0x7550_1002);
-    {
-        let _ready = Cold::new(inputs)
-            .quiesce_and_bind()
-            .unwrap_or_else(|error| panic!("{:?}", error.error));
-        assert_eq!(
-            state.borrow().events,
-            ["views-seal", "flr", "root-drain", "bind"]
-        );
-    }
-    kept(&state.borrow());
-    let (inputs, state) = inputs_for(0x7550_8086);
-    drop(failure(Cold::new(inputs).quiesce_and_bind()));
-    assert!(state.borrow().events.is_empty());
-}
-/// AMD fork (J6): a Radeon without a function-local reset starts unreset,
-/// even untranslated with a bus reset on offer: amdgpu resets it itself.
-#[test]
-fn a_radeon_without_a_function_reset_is_left_to_amdgpu() {
-    let (mut inputs, state) = inputs_for(0x7550_1002);
-    {
-        let words = &mut inputs.requester.function.config().words;
-        words[0x44 / 4] = 0;
-        words[0x84 / 4] = 8;
-    }
-    state.borrow_mut().bus_reset = true;
-    let candidate = check_candidate(
-        &mut inputs.requester.function,
-        &PhysicalTimer(state.clone()),
-        false,
-        true,
-    );
-    assert_eq!(candidate, Ok(None));
-    let ready = Cold::new(inputs)
-        .quiesce_and_bind()
-        .unwrap_or_else(|error| panic!("{:?}", error.error));
-    assert_eq!(ready.reset(), None);
-    assert_eq!(state.borrow().events, ["views-seal", "root-drain", "bind"]);
-}
-/// AMD fork: a Radeon without a function reset is never reset through its
-/// bus; translated, it starts as left, and untranslated it is refused.
-#[test]
-fn a_radeon_is_never_reset_through_its_bus() {
-    for translated in [true, false] {
-        let (mut inputs, state) = inputs_for(0x7550_1002);
-        {
-            let words = &mut inputs.requester.function.config().words;
-            words[0x44 / 4] = 0;
-            words[0x84 / 4] = 8;
-        }
-        state.borrow_mut().bus_reset = true;
-        let candidate = check_candidate(
-            &mut inputs.requester.function,
-            &PhysicalTimer(state.clone()),
-            translated,
-            true,
-        );
-        if !translated {
-            assert_eq!(candidate, Err(Error::ResetUnavailable));
-            continue;
-        }
-        assert_eq!(candidate, Ok(None));
-        // SAFETY: the symbolic domain stands for a translating one.
-        let ready = unsafe { Cold::new(inputs).translated() }
-            .quiesce_and_bind()
-            .unwrap_or_else(|error| panic!("{:?}", error.error));
-        assert_eq!(ready.reset(), None);
-        assert_eq!(state.borrow().events, ["views-seal", "root-drain", "bind"]);
-    }
-}
 #[test]
 fn preflight_never_seals_or_resets_an_unsupported_or_foreign_source() {
     for case in 0..4 {
@@ -346,6 +272,29 @@ fn preflight_never_seals_or_resets_an_unsupported_or_foreign_source() {
         drop(failed);
         kept(&state.borrow());
     }
+}
+#[test]
+fn an_amd_gpu_binds_without_the_reset_its_driver_makes_itself() {
+    // An RX 9070 or 6800 XT, which offers no FLR, untranslated and with its
+    // bus reset offered: amdgpu resets it itself, so none happens here.
+    let (mut inputs, state) = inputs_for(0x7550_1002);
+    inputs.requester.function.config().words[0x44 / 4] = 0;
+    state.borrow_mut().bus_reset = true;
+    let candidate = check_candidate(
+        &mut inputs.requester.function,
+        &PhysicalTimer(state.clone()),
+        false,
+        true,
+    );
+    assert_eq!(candidate, Ok(Some(Reset::Driver)));
+    {
+        let ready = Cold::new(inputs)
+            .quiesce_and_bind()
+            .unwrap_or_else(|error| panic!("{:?}", error.error));
+        assert_eq!(ready.reset(), Some(Reset::Driver));
+        assert_eq!(state.borrow().events, ["views-seal", "root-drain", "bind"]);
+    }
+    kept(&state.borrow());
 }
 #[test]
 fn failed_original_cpu_view_retirement_cannot_reset_or_bind() {

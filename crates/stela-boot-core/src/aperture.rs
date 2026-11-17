@@ -163,10 +163,59 @@ struct Sharer {
     reachable: AtomicBool,
     /// A retirement sent it an NMI its gate has not taken yet.
     poked: AtomicBool,
+    /// Retirement NMIs sent to it ([`Processors::poke`]) that have not
+    /// arrived yet: raised before each is sent, lowered by the gate that
+    /// takes one ([`Processors::nmi_gate`]), whoever took the mark.
+    owed: AtomicU64,
+    /// Counter NMIs that may still arrive although their counters were
+    /// already reloaded, by a gate that found more than one fired or by a
+    /// look for a lost overflow ([`Processors::owe_samples`]); at most
+    /// [`HELD_SAMPLES`].
+    held: AtomicU64,
+    /// Its gate stopped on an NMI that found the mark set.
+    stop_marked: AtomicBool,
     /// The latest generation its NMI gate flushed through, and the
     /// instruction the NMI found it at.
     answered: AtomicU64,
     rip: AtomicU64,
+}
+
+/// What a processor's NMI gate found one NMI to be ([`Processors::nmi_gate`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NmiGate {
+    /// A counter sample this gate took: return.
+    Sample,
+    /// A retirement's NMI with its mark: return.
+    Poke,
+    /// A retirement's NMI whose mark an earlier gate took: return.
+    OwedPoke,
+    /// A counter's NMI whose counter an earlier gate or look reloaded:
+    /// return.
+    HeldSample,
+    /// Nothing sent or overflowed is owed, or the step watchdog's: stop.
+    Stop,
+}
+
+/// The most counter NMIs a processor may still be owed for counters
+/// already reloaded: one per sampled counter. Two overflows a hypervisor
+/// or the processor delivers as one NMI leave that many unused, which an
+/// unknown NMI may then take.
+pub const HELD_SAMPLES: u64 = 2;
+
+/// Lower `count` by one if it is above zero: whether it was.
+fn take_one(count: &AtomicU64) -> bool {
+    count
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+            value.checked_sub(1)
+        })
+        .is_ok()
+}
+
+/// Raise `count` by `by`, to [`HELD_SAMPLES`] at most.
+fn hold(count: &AtomicU64, by: u64) {
+    let _ = count.try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+        Some(value.saturating_add(by).min(HELD_SAMPLES))
+    });
 }
 
 /// The range one request retired, by generation; read like a sequence
@@ -240,6 +289,9 @@ impl Processors {
                     terminal: AtomicBool::new(false),
                     reachable: AtomicBool::new(false),
                     poked: AtomicBool::new(false),
+                    owed: AtomicU64::new(0),
+                    held: AtomicU64::new(0),
+                    stop_marked: AtomicBool::new(false),
                     answered: AtomicU64::new(0),
                     rip: AtomicU64::new(0),
                 }
@@ -491,18 +543,25 @@ impl Processors {
     /// Ask slot `slot`'s processor, which has not acknowledged `generation`
     /// in time, to answer by NMI: whether the caller sends it one. One that
     /// cannot take it (not reachable), needs none (idle or acknowledged) or
-    /// has one outstanding gets none, so its gate takes each NMI sent for a
-    /// retirement as one ([`Self::take_poke`]) and two never merge into one.
+    /// has one outstanding mark gets none. The mark and the count of NMIs
+    /// owed are both set before the NMI is sent: another NMI's gate may take
+    /// the mark first, and the retirement's NMI is then claimed by the count
+    /// ([`Self::nmi_gate`]).
     pub fn poke(&self, slot: usize, generation: u64) -> bool {
         let Some(sharer) = self.sharers.get(slot) else {
             return false;
         };
-        sharer.reachable.load(Ordering::Acquire)
+        let send = sharer.reachable.load(Ordering::Acquire)
             && self.pending(slot, generation)
             && sharer
                 .poked
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-                .is_ok()
+                .is_ok();
+        if send {
+            // Before the send: the gate the NMI reaches finds it owed.
+            sharer.owed.fetch_add(1, Ordering::AcqRel);
+        }
+        send
     }
 
     /// The NMI [`Self::poke`] asked for could not be sent: a later
@@ -510,7 +569,92 @@ impl Processors {
     pub fn unpoke(&self, slot: usize) {
         if let Some(sharer) = self.sharers.get(slot) {
             sharer.poked.store(false, Ordering::Release);
+            take_one(&sharer.owed);
         }
+    }
+
+    /// Slot `slot`'s processor reloaded `counters` counters that had
+    /// overflowed outside its NMI gate (a look for an overflow whose NMI
+    /// never came): their NMIs may still arrive.
+    pub fn owe_samples(&self, slot: usize, counters: u64) {
+        if let Some(sharer) = self.sharers.get(slot) {
+            hold(&sharer.held, counters);
+        }
+    }
+
+    /// The NMI accounting of slot `slot`'s processor, for a stop's report:
+    /// retirement NMIs owed, counter NMIs held, and whether the NMI it
+    /// stopped on found the mark.
+    pub fn nmi_owed(&self, slot: usize) -> (u64, u64, bool) {
+        self.sharers.get(slot).map_or((0, 0, false), |sharer| {
+            (
+                sharer.owed.load(Ordering::Acquire),
+                sharer.held.load(Ordering::Acquire),
+                sharer.stop_marked.load(Ordering::Relaxed),
+            )
+        })
+    }
+
+    /// Slot `slot`'s NMI gate decides what one NMI was, after its handler
+    /// took the counter sample of `fired` counters it found overflowed and
+    /// reloaded: the step watchdog's (`watchdog`, which always stops), a
+    /// sample, a retirement's, or a counter NMI an earlier reload left
+    /// owed. With the NMI, whether the gate answers a retirement (flushes
+    /// and acknowledges): when it took the mark or claimed a retirement's.
+    ///
+    /// Every NMI that comes is owed by one source, but not always by the
+    /// one its gate sees: a processor holds one NMI back while its gate
+    /// runs and a hypervisor queues two, and a retirement's NMI can arrive
+    /// milliseconds after it was sent. So the gate counts rather than looks
+    /// at marks alone:
+    /// - each fired counter owes one NMI; this one is the first, and any
+    ///   others (two counters overflowed together) are held for NMIs to come;
+    /// - each retirement NMI sent is owed until an NMI with no fired counter
+    ///   claims it, whichever gate took its mark (another NMI's gate may take
+    ///   the mark while the retirement's NMI is on its way, or a
+    ///   retirement's NMI may come when a counter fired, whose own NMI then
+    ///   claims the retirement's place);
+    /// - an NMI with no fired counter, no retirement NMI owed and no counter
+    ///   NMI held is unknown and stops.
+    ///
+    /// The retirement count is exact. The counter count can only be too
+    /// high, by [`HELD_SAMPLES`] at most, when two overflows came as one NMI.
+    pub fn nmi_gate(
+        &self,
+        slot: usize,
+        fired: u64,
+        watchdog: impl FnOnce() -> bool,
+    ) -> (NmiGate, bool) {
+        let Some(sharer) = self.sharers.get(slot) else {
+            let gate = if fired != 0 && !watchdog() {
+                NmiGate::Sample
+            } else {
+                NmiGate::Stop
+            };
+            return (gate, false);
+        };
+        let marked = sharer.poked.swap(false, Ordering::AcqRel);
+        if watchdog() {
+            sharer.stop_marked.store(marked, Ordering::Relaxed);
+            return (NmiGate::Stop, false);
+        }
+        if fired != 0 {
+            hold(&sharer.held, fired - 1);
+            return (NmiGate::Sample, marked);
+        }
+        if take_one(&sharer.owed) {
+            let gate = if marked {
+                NmiGate::Poke
+            } else {
+                NmiGate::OwedPoke
+            };
+            return (gate, true);
+        }
+        if take_one(&sharer.held) {
+            return (NmiGate::HeldSample, marked);
+        }
+        sharer.stop_marked.store(marked, Ordering::Relaxed);
+        (NmiGate::Stop, false)
     }
 
     /// In slot `slot`'s NMI gate: whether a retirement sent the NMI it
@@ -1082,6 +1226,142 @@ mod tests {
         assert!(processors.poke(ap, next));
         assert!(!processors.poke(MAX_PROCESSORS, next));
         assert!(!processors.take_poke(MAX_PROCESSORS));
+    }
+
+    /// A processor with a retirement's NMI sent to it and its gate taken.
+    fn gated() -> (Processors, usize) {
+        let processors = Processors::new();
+        let _bsp = processors.join_bsp(0).unwrap();
+        let ap = processors.join_ap(2).unwrap();
+        processors.set_reachable(ap);
+        (processors, ap)
+    }
+
+    /// Send slot `ap` a retirement's NMI for a new request.
+    fn send(processors: &Processors, ap: usize) {
+        let generation = processors.request(None);
+        assert!(processors.poke(ap, generation));
+    }
+
+    const QUIET: fn() -> bool = || false;
+
+    /// Nothing owed stops; a sample returns; the watchdog's always stops.
+    #[test]
+    fn an_nmi_nothing_owes_stops_and_a_sample_returns() {
+        let (processors, ap) = gated();
+        assert_eq!(processors.nmi_gate(ap, 0, QUIET), (NmiGate::Stop, false));
+        assert_eq!(processors.nmi_gate(ap, 1, QUIET), (NmiGate::Sample, false));
+        assert_eq!(processors.nmi_gate(ap, 1, || true), (NmiGate::Stop, false));
+        // A retirement's NMI alone is claimed once, and answered.
+        send(&processors, ap);
+        assert_eq!(processors.nmi_gate(ap, 0, QUIET), (NmiGate::Poke, true));
+        assert_eq!(processors.nmi_gate(ap, 0, QUIET), (NmiGate::Stop, false));
+        assert!(!processors.take_poke(MAX_PROCESSORS));
+        assert_eq!(
+            processors.nmi_gate(MAX_PROCESSORS, 1, QUIET),
+            (NmiGate::Sample, false)
+        );
+    }
+
+    /// A sample's NMI comes while a retirement's NMI is on its way, however
+    /// long (a descheduled processor): its gate takes the mark and answers;
+    /// the retirement's NMI, with nothing fired and no mark, is still owed.
+    #[test]
+    fn a_retirement_nmi_whose_mark_a_sample_took_is_still_claimed() {
+        let (processors, ap) = gated();
+        send(&processors, ap);
+        assert_eq!(processors.nmi_gate(ap, 1, QUIET), (NmiGate::Sample, true));
+        assert_eq!(processors.nmi_gate(ap, 0, QUIET), (NmiGate::OwedPoke, true));
+        assert_eq!(processors.nmi_gate(ap, 0, QUIET), (NmiGate::Stop, false));
+    }
+
+    /// A retirement's NMI comes while a counter fired whose own NMI is held
+    /// back: the gate takes it as the sample, and the counter's NMI then
+    /// claims the retirement's place.
+    #[test]
+    fn a_counter_nmi_held_behind_a_retirement_nmi_is_claimed() {
+        let (processors, ap) = gated();
+        send(&processors, ap);
+        assert_eq!(processors.nmi_gate(ap, 1, QUIET), (NmiGate::Sample, true));
+        assert_eq!(processors.nmi_gate(ap, 0, QUIET), (NmiGate::OwedPoke, true));
+        assert_eq!(processors.nmi_gate(ap, 0, QUIET), (NmiGate::Stop, false));
+    }
+
+    /// Two counters fired in one gate: the second counter's NMI is held.
+    /// Two overflows that came as one NMI leave a held NMI an unknown one
+    /// takes, at most two.
+    #[test]
+    fn a_second_counter_nmi_is_held_and_held_nmis_stay_bounded() {
+        let (processors, ap) = gated();
+        assert_eq!(processors.nmi_gate(ap, 2, QUIET), (NmiGate::Sample, false));
+        assert_eq!(
+            processors.nmi_gate(ap, 0, QUIET),
+            (NmiGate::HeldSample, false)
+        );
+        assert_eq!(processors.nmi_gate(ap, 0, QUIET), (NmiGate::Stop, false));
+        for _ in 0..5 {
+            assert_eq!(processors.nmi_gate(ap, 2, QUIET), (NmiGate::Sample, false));
+        }
+        assert_eq!(processors.nmi_owed(ap).1, HELD_SAMPLES);
+        assert_eq!(processors.nmi_gate(ap, 0, QUIET).0, NmiGate::HeldSample);
+        assert_eq!(processors.nmi_gate(ap, 0, QUIET).0, NmiGate::HeldSample);
+        assert_eq!(processors.nmi_gate(ap, 0, QUIET).0, NmiGate::Stop);
+    }
+
+    /// A second retirement sends while the first one's NMI is still on its
+    /// way (a sample's gate took its mark): both NMIs are claimed.
+    #[test]
+    fn a_retirement_nmi_sent_while_another_is_on_its_way_is_claimed() {
+        let (processors, ap) = gated();
+        send(&processors, ap);
+        assert_eq!(processors.nmi_gate(ap, 1, QUIET), (NmiGate::Sample, true));
+        send(&processors, ap);
+        assert_eq!(processors.nmi_owed(ap).0, 2);
+        assert_eq!(processors.nmi_gate(ap, 0, QUIET), (NmiGate::Poke, true));
+        assert_eq!(processors.nmi_gate(ap, 0, QUIET), (NmiGate::OwedPoke, true));
+        assert_eq!(processors.nmi_gate(ap, 0, QUIET), (NmiGate::Stop, false));
+    }
+
+    /// The retirement decides to send, then the processor acknowledges at a
+    /// safe point before the NMI comes: the NMI is still claimed, and its
+    /// answer flushes nothing new.
+    #[test]
+    fn a_retirement_nmi_after_the_processor_answered_is_claimed() {
+        let (processors, ap) = gated();
+        let generation = processors.request(None);
+        assert!(processors.poke(ap, generation));
+        processors.acknowledge(ap, generation);
+        assert!(!processors.pending(ap, generation));
+        assert_eq!(processors.nmi_gate(ap, 0, QUIET), (NmiGate::Poke, true));
+        assert_eq!(processors.nmi_gate(ap, 0, QUIET), (NmiGate::Stop, false));
+    }
+
+    /// A look for an overflow whose NMI never came reloads the counter: if
+    /// its NMI comes after all, it is claimed. An NMI that could not be sent
+    /// is not owed.
+    #[test]
+    fn a_counter_nmi_after_a_reload_outside_the_gate_and_an_unsent_nmi() {
+        let (processors, ap) = gated();
+        processors.owe_samples(ap, 1);
+        assert_eq!(
+            processors.nmi_gate(ap, 0, QUIET),
+            (NmiGate::HeldSample, false)
+        );
+        assert_eq!(processors.nmi_gate(ap, 0, QUIET), (NmiGate::Stop, false));
+        send(&processors, ap);
+        processors.unpoke(ap);
+        assert_eq!(processors.nmi_owed(ap).0, 0);
+        assert_eq!(processors.nmi_gate(ap, 0, QUIET), (NmiGate::Stop, false));
+    }
+
+    /// The watchdog's NMI stops even with NMIs owed, and the stop's report
+    /// says what was owed and that the mark was set.
+    #[test]
+    fn the_watchdog_nmi_stops_whatever_is_owed() {
+        let (processors, ap) = gated();
+        send(&processors, ap);
+        assert_eq!(processors.nmi_gate(ap, 0, || true), (NmiGate::Stop, false));
+        assert_eq!(processors.nmi_owed(ap), (1, 0, true));
     }
 
     /// Late acknowledgements reach one report a period at most, which

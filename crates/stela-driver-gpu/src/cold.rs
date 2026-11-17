@@ -1,5 +1,6 @@
 //! GPU reset while the original configuration and DMA root stay owned: a
-//! function-local reset, else a Secondary Bus Reset of the GPU's own bus.
+//! function-local reset, else a Secondary Bus Reset of the GPU's own bus;
+//! for an AMD GPU none, as amdgpu resets the GPU itself ([`Reset::Driver`]).
 use alloc::{boxed::Box, rc::Rc};
 use core::mem::ManuallyDrop;
 use stela_driver_base::{
@@ -16,8 +17,6 @@ use stela_driver_base::{
     },
 };
 
-const NVIDIA: u16 = 0x10de;
-/// AMD fork (J6): an RDNA 4 Radeon goes through the same cold handoff.
 const AMD: u16 = 0x1002;
 const DISPLAY: u8 = 3;
 const EXPRESS: u8 = 0x10;
@@ -54,6 +53,16 @@ pub enum Reset {
     /// Secondary Bus Reset on the bridge above the GPU's own bus, as Linux
     /// `pci_reset_function` falls back to `pci_parent_bus_reset`.
     SecondaryBus,
+    /// None here: the driver resets the GPU itself. An AMD GPU offers no
+    /// FLR, and its bus's secondary reset would take its HDMI audio
+    /// function along. amdgpu resets the GPU on init, MODE1 through the SMU,
+    /// when the PSP's secure OS still runs from an earlier driver
+    /// (`soc24_need_reset_on_init`, `nv_need_reset_on_init`), and otherwise
+    /// takes it as the firmware left it, as Linux does at every boot. The
+    /// gated function issues no request until amdgpu sets its master bit,
+    /// and from then on the private domain bounds what anything the
+    /// firmware left running in the GPU can reach.
+    Driver,
 }
 
 /// The original CPU framebuffer/register writers and their translation owners.
@@ -100,7 +109,8 @@ pub unsafe trait Preparation: 'static {
     /// # Safety
     /// A function-local reset (FLR or D3hot soft reset) or a Secondary Bus
     /// Reset, and readiness/containment revalidation, completed with CPU
-    /// views sealed and all old owners still kept, or the function has no
+    /// views sealed and all old owners still kept, or the function's driver
+    /// resets it itself ([`Reset::Driver`]), or the function has no
     /// reset and the private domain translates its every request, so
     /// engines firmware left running reach only that domain. Nothing can
     /// rearm the function before the original root drain and private bind.
@@ -189,14 +199,11 @@ fn preflight<C: ConfigSpace>(
     bus_reset: bool,
 ) -> Result<Option<Reset>, Error> {
     timer.check().map_err(Error::Clock)?;
-    if !matches!(function.vendor, NVIDIA | AMD) || function.class[0] != DISPLAY {
+    // Which vendor's display function it is, is its stack's selection
+    // (`GpuStack::select`), which the caller compared with this function.
+    if function.class[0] != DISPLAY {
         return Err(Error::Identity);
     }
-    // AMD fork: a Navi 48 lent to a VM did not bring its link back after a
-    // Secondary Bus Reset (the Radeon reset bug). A Radeon is never reset
-    // through its bus: amdgpu resets it itself (PSP mode 1) as it starts,
-    // and without a function reset it starts as left, with translation.
-    let bus_reset = bus_reset && function.vendor != AMD;
     requester::validate_stopped(function).map_err(Error::Claim)?;
     let mut express = None;
     for entry in capability::capabilities(function.config()) {
@@ -205,23 +212,24 @@ fn preflight<C: ConfigSpace>(
             return Err(Error::Identity);
         }
     }
+    if function.vendor == AMD {
+        return Ok(Some(Reset::Driver));
+    }
     // Linux `pci_reset_function` falls back from FLR to a D3hot soft reset,
-    // then to a reset of the bus the function sits on alone. nouveau itself
-    // never resets: it starts what firmware left. A GPU an earlier run left
-    // with its secure region (WPR2) standing fails nouveau's FWSEC-FRTS
-    // until it is reset, and translation does not clear that, so every
+    // then to a reset of the bus the function sits on alone. No GPU driver
+    // of Linux resets at its probe: each starts what firmware left. Here a
+    // reset comes first for every stack, for two reasons. An NVIDIA GPU an
+    // earlier run left with its secure region (WPR2) standing fails
+    // nouveau's FWSEC-FRTS until it is reset, and translation does not
+    // clear that. And a function that keeps what firmware started (an
+    // integrated GPU scans out the firmware's picture) keeps doing DMA no
+    // domain of Stela's confines while its unit is untranslated. So every
     // reset that is available comes first. Only a GPU with none starts as
     // firmware left it, and only with translation: otherwise an engine
     // firmware left running could write recycled RAM once bus mastering is
     // on.
     match function.reset_method().map_err(Error::Reset)? {
         Some(method) => Ok(Some(Reset::Function(method))),
-        // AMD fork (J6): a Radeon without a function-local reset is not
-        // reset through its bus, which a Navi 48 does not come back from
-        // (its link stays down, as the first VM trial saw). amdgpu resets
-        // it itself, through its PSP (mode 1), when it finds the firmware
-        // an earlier driver left running, as it does under Linux.
-        None if function.vendor == AMD => Ok(None),
         None if bus_reset => Ok(Some(Reset::SecondaryBus)),
         None if translated => Ok(None),
         None => Err(Error::ResetUnavailable),
@@ -292,7 +300,7 @@ impl<P: Preparation, V: Views<P::Config>> Cold<P, V> {
                     }
                 }
                 Some(Reset::SecondaryBus) => requester.reset_bus(timer).map_err(Error::Reset)?,
-                None => {}
+                Some(Reset::Driver) | None => {}
             }
             requester::validate_stopped(requester.function_mut()).map_err(Error::Claim)?;
             Ok(reset)

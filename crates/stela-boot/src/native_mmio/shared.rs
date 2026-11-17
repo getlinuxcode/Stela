@@ -451,6 +451,10 @@ pub(crate) struct Source {
     authority: Authority,
     window: Option<super::Window>,
     reservations: core::cell::RefCell<Vec<Assignment<Reservation>>>,
+    /// Windows delegated exclusively to ACPI suballocators. They stay excluded
+    /// from new native claims, but are not physical-ABI lookup resources:
+    /// only each broker's retained child may be mapped.
+    broker_roots: core::cell::RefCell<Vec<Resource>>,
     hpet_assignment: core::cell::RefCell<Option<Assignment<Reservation>>>,
     pci_slots: config_space::PciSlots,
     pci_clock: core::cell::OnceCell<crate::native_clock::Prepared>,
@@ -650,6 +654,7 @@ impl Source {
             authority,
             window,
             reservations: core::cell::RefCell::new(Vec::new()),
+            broker_roots: core::cell::RefCell::new(Vec::new()),
             hpet_assignment: core::cell::RefCell::new(None),
             pci_slots: config_space::PciSlots::new(),
             pci_clock: core::cell::OnceCell::new(),
@@ -720,6 +725,18 @@ impl Source {
         kind: ResourceKind,
         parent: Parent,
     ) -> Result<(Resource, Assignment<Reservation>), Error> {
+        if self
+            .broker_roots
+            .try_borrow()
+            .map_err(|_| Error::Busy)?
+            .iter()
+            .any(|root| {
+                let held = root.physical_span();
+                held.start() < span.end() && span.start() < held.end()
+            })
+        {
+            return Err(Error::ResourceConflict);
+        }
         let reservation = Reservation {
             platform: self.platform.clone(),
             parent,
@@ -827,6 +844,36 @@ impl Source {
             return Err(Error::OutsideResource);
         }
         self.reserve(span, ResourceKind::Registers)
+    }
+
+    /// Reserve a platform window for one exclusive ACPI MemoryBroker. Its
+    /// parent is retained for custody, not published as a second mappable
+    /// owner overlapping every child. New native claims still exclude it.
+    ///
+    /// # Safety
+    /// The caller owns this device and moves the returned root into exactly
+    /// one MemoryBroker, without mapping or exporting an alias of the root.
+    pub(crate) unsafe fn claim_platform_broker(
+        &self,
+        span: PhysicalSpan,
+    ) -> Result<Resource, Error> {
+        // Reserve ledger capacity before changing registry ownership.
+        self.broker_roots
+            .try_borrow_mut()
+            .map_err(|_| Error::Busy)?
+            .try_reserve(1)
+            .map_err(|_| Error::Exhausted)?;
+        // SAFETY: caller supplies the same platform device ownership contract.
+        let root = unsafe { self.claim_platform(span) }?;
+        // register_resource returns the existing ID for this exact backing.
+        let id = self
+            .authority
+            .register_resource(root.clone())
+            .map_err(|failure| failure.error)?;
+        self.authority.unregister_resource(id)?;
+        // No callbacks or other CPU can enter this affine source in between.
+        self.broker_roots.borrow_mut().push(root.clone());
+        Ok(root)
     }
 }
 

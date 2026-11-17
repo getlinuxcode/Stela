@@ -49,6 +49,20 @@ sudo xtask/scripts/vfio-gpu.sh run --stop-desktop --seconds 1800 -- \
 
 ## Où on en est (17 novembre 2026)
 
+**Upstream 0.5.0 porte AMD lui-même, et le fork l'a fusionnée** en prenant sa version pour tout le portage. Elle comprend :
+
+- amdgpu dans l'image : le `module_init` capturé dans l'image d'enregistrement et les firmwares épinglés pour la Navi 48 et la Navi 21 ;
+- RADV dans l'image, avec `cargo xtask boot build --radv` ;
+- des correctifs RADV et Metal jusqu'à WindowServer et aux icônes.
+
+Le portage parallèle du fork (J6 et J7, qui va de `build/amdgpu.rs` à `gpu_amd.rs` en passant par `radv.rs`) est retiré. Il a d'abord validé sur la vraie carte le chemin que prend upstream : firmwares, réveil sans réinitialisation, amdgpu complet, commandes GPU, écran par DCN. Le récit des essais reste ci-dessous et dans `docs/amd/amdgpu.md`. Le mode `--gpu-trial` et ses scripts ont aussi été retirés, puisque le démarrage d'upstream n'a pas ce point d'accroche.
+
+Restent propres au fork :
+
+- le banc `stela-amd-host`, qui fait tourner la suite Metal sur la 9070 XT sous Linux. Il ouvre maintenant le périphérique Metal par l'API générique d'upstream (`metal::open`), avec son admission J0 (`admission.rs`, `chip.rs`) ;
+- les patchs Mesa 9001 à 9003, les scripts de VM (`vfio-gpu.sh --autologin`, `amd-agent.sh`) et cette documentation.
+
+
 Fait depuis Windows, sans la carte :
 
 - Fork `getmowbot/Stela` : les patchs J0 et J2, `vfio-gpu.sh` et cette feuille de route sont dans `main`. Le remote `upstream` pointe sur `tylertms/Stela`, avec `git rerere` activé dans le clone Windows. À refaire dans chaque nouveau clone.
@@ -74,8 +88,9 @@ Fait sous Linux (Ubuntu 24.04, noyau 6.14, Mesa 25.2.8) :
 
 À faire ensuite, dans cet ordre :
 
-1. J6 : brancher `metal/kms.rs` (la scanout de macOS) sur amdgpu comme sur nouveau. Fait : la console de Stela sur l'écran de la Radeon.
-2. J7 : RADV dans l'image de démarrage, pour que Metal tourne sur la Radeon sous Stela.
+1. Construire l'image d'upstream avec `cargo xtask boot build --radv`, et la démarrer en VM avec la carte prêtée.
+2. J7 : installer macOS 27 avec cette image. L'image d'installation vient du Mac M3 Pro. Aller jusqu'à l'assistant de configuration, en VM puis sur le vrai PC (disque Seagate, Secure Boot désactivé).
+3. Comparer la suite Metal du banc (`stela-amd-host`) avec les correctifs RADV d'upstream, et retirer les patchs 9001 à 9003 qu'ils rendent inutiles.
 
 ## Jalons
 

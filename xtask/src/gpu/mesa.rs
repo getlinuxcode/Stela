@@ -119,34 +119,21 @@ fn artifacts(directory: &Path, report: &Report) -> Result<Vec<Value>> {
 
 fn inspect_archive(path: &Path, stela_library: bool) -> Result<Value> {
     let data = fs::read(path)?;
-    // glibc installs some static libraries (libm.a, libc.a) as GNU ld
-    // scripts grouping the archives that hold the objects.
-    if !stela_library && data.starts_with(b"/* GNU ld script") {
-        let script = String::from_utf8_lossy(&data);
-        let members = script
-            .split(|c: char| c.is_whitespace() || c == '(' || c == ')')
-            .filter(|word| word.starts_with('/') && word.ends_with(".a"))
-            .map(|member| inspect_archive(Path::new(member), false))
-            .collect::<Result<Vec<_>>>()?;
-        ensure!(!members.is_empty(), "{} groups no archives", path.display());
-        return Ok(json!({"binding": tools::binding(path)?, "ld_script": members}));
-    }
-    let archive = ArchiveFile::parse(&*data).with_context(|| path.display().to_string())?;
+    let archive = ArchiveFile::parse(&*data)?;
     let mut formats = BTreeSet::new();
     let mut architectures = BTreeSet::new();
     let mut undefined = BTreeSet::new();
     let mut count = 0;
     for member in archive.members() {
         let member = member?;
-        // A thin archive, which GNU ar makes for Meson, names its members'
-        // files relative to itself instead of holding them.
-        let file;
+        // Meson links static libraries it does not install as thin
+        // archives, whose members stay in their own files, named relative
+        // to the archive.
+        let stored;
         let bytes = if archive.is_thin() {
-            let name = std::str::from_utf8(member.name()).context("thin member name")?;
-            let parent = path.parent().context("archive directory")?;
-            file = fs::read(parent.join(name))
-                .with_context(|| format!("{name}, a member of {}", path.display()))?;
-            &file[..]
+            let name = std::str::from_utf8(member.name()).context("thin archive member name")?;
+            stored = fs::read(path.parent().context("archive directory")?.join(name))?;
+            &stored[..]
         } else {
             member.data(&*data)?
         };
@@ -167,13 +154,7 @@ fn inspect_archive(path: &Path, stela_library: bool) -> Result<Value> {
         }
         count += 1;
     }
-    // glibc 2.34 and newer ship libdl, libpthread and librt as empty
-    // archives, their functions having moved into libc.
-    ensure!(
-        count > 0 || !stela_library,
-        "{} contains no objects",
-        path.display()
-    );
+    ensure!(count > 0, "{} contains no objects", path.display());
     let name = path
         .file_name()
         .and_then(|name| name.to_str())

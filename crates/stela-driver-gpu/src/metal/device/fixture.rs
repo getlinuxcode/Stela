@@ -9,7 +9,8 @@ use crate::metal::{
     command_buffer::Segment,
     error::{Error, NO_FUNCTION, Result},
     library::tests::fixture,
-    nvidia::{CHIPS, Chip, PcieLink, fixture::nvk},
+    nvidia::{CHIPS, Chip, fixture::nvk},
+    open::PcieLink,
     reflection::{
         ArrayType, Binding, BindingAccess, BindingKind, PointerType, StructMember, StructType,
         TextureReferenceType, Type,
@@ -144,6 +145,8 @@ impl Outside for MockOutside {
 pub(crate) struct MockBackend {
     pub(crate) idle_calls: usize,
     pub(crate) idle_error: Option<Error>,
+    /// What each idle step answers, in order; idle once used up.
+    pub(crate) idle_steps: alloc::collections::VecDeque<crate::metal::vulkan::backend::IdleStep>,
     pub(crate) semaphore_error: Option<Error>,
     /// Timeline values the device told the backend passed without a query,
     /// in order.
@@ -276,6 +279,12 @@ impl Backend for MockBackend {
     fn acknowledge_idle(&mut self) -> Result<()> {
         self.idle_calls += 1;
         self.idle_error.map_or(Ok(()), Err)
+    }
+
+    fn idle_step(&mut self) -> crate::metal::vulkan::backend::IdleStep {
+        self.idle_steps
+            .pop_front()
+            .unwrap_or(crate::metal::vulkan::backend::IdleStep::Idle)
     }
 
     fn physical_device(&self) -> &PhysicalDevice {
@@ -1011,7 +1020,7 @@ pub(crate) fn device() -> TestDevice {
 /// A device of the first chip over `backend`, holding [`LIBRARY`].
 pub(crate) fn device_on(backend: MockBackend) -> TestDevice {
     let chip: &Chip = &CHIPS[0];
-    let platform = chip.platform(crate::metal::nvidia::Attachment {
+    let platform = chip.platform(crate::metal::open::Attachment {
         link: PcieLink {
             speed: 4,
             width: 16,

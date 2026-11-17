@@ -18,21 +18,27 @@ workspace = true
 [features]
 # Common native Linux kernel services; selecting this attaches no GPU.
 linux-kernel = ["dep:cc", "dep:stela-c-build", "stela-c-build/linux", "dep:stela-linux", "stela-linux/kernel"]
+# DRM's core and helpers with their registrations, which every driver port
+# builds over; selecting this attaches no GPU.
+linux-drm = ["linux-kernel", "stela-c-build/linux-registry"]
 # nouveau's hardware resource manager (NVKM), compiled unchanged; it reaches
 # no device until the kernel services it imports are supplied.
-nouveau-port = ["linux-kernel", "stela-c-build/linux-registry"]
-# AMD fork (J6): checks amdgpu's sources against the Linux environment and
-# reports what stops them (`build/amdgpu.rs`); links nothing.
-amdgpu-census = ["nouveau-port", "dep:serde_json"]
-# AMD fork (J6): amdgpu linked as `stela-amdgpu`, with its own Linux image
-# (`stela_linux_amdgpu_image`); the boot starts it for a Radeon.
-amdgpu-port = ["nouveau-port", "dep:serde_json"]
+nouveau-port = ["linux-drm"]
+# amdgpu with its display core, compiled unchanged; its unit joins the
+# image's registrations and AMD's stack its GPUs.
+amdgpu-port = ["linux-drm"]
+# Intel's xe with the display code it shares with i915, compiled unchanged;
+# no boot starts it yet.
+xe-port = ["linux-drm"]
 # Stela's Metal device over the internal Vulkan boundary; no Vulkan driver.
 metal = ["dep:stela-contracts"]
 # The Metal device's native backend over a loaded Vulkan driver (NVK).
 metal-vulkan = ["metal", "dep:ash"]
 # The image links the Metal compiler's C (`crates/stela-mesa`).
 metal-linked = ["metal-vulkan"]
+# AMD's stack draws on RADV, which the image must link (`stela_vulkan_amd`);
+# without it amdgpu shows frames another GPU drew.
+radv = ["amdgpu-port", "metal-linked"]
 
 [dependencies]
 stela-linux = { path = "../stela-linux", optional = true }
@@ -54,5 +60,3 @@ sha2 = { version = "0.10", default-features = false }
 object = { version = "0.37", default-features = false, features = ["read"] }
 cc = { version = "1", optional = true }
 stela-c-build = { path = "../stela-c-build", optional = true }
-# AMD fork: reads amdgpu's Kbuild (`build/amdgpu-kbuild.json`).
-serde_json = { workspace = true, optional = true }

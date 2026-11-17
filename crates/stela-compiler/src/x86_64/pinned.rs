@@ -533,7 +533,8 @@ pub fn capture(state: &mut GuestState) -> HostGprSnapshot {
 }
 
 /// `body`, whose exits return, in code that runs it as the engine does: the
-/// pinned registers loaded around it. The engine's own entry does this; this
+/// pinned registers loaded around it and the exits' stack pointer set
+/// ([`super::chain::EXIT_RSP_STORE`]). The engine's own entry does this; this
 /// is for running a block anywhere else.
 pub fn entered(body: &[u8]) -> alloc::vec::Vec<u8> {
     const SAVE: [u8; 10] = [0x53, 0x55, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57];
@@ -546,6 +547,7 @@ pub fn entered(body: &[u8]) -> alloc::vec::Vec<u8> {
     write_back(&mut stores);
     let mut code = SAVE.to_vec();
     code.extend_from_slice(&loads);
+    code.extend(super::chain::EXIT_RSP_STORE);
     code.push(0xe8);
     code.extend(((stores.len() + RESTORE.len()) as i32).to_le_bytes());
     code.extend_from_slice(&stores);
@@ -554,7 +556,8 @@ pub fn entered(body: &[u8]) -> alloc::vec::Vec<u8> {
     code
 }
 
-/// Code that runs the block at RCX as the engine does, for a host that keeps
+/// Code that runs the block at RCX as the engine does, the exits' stack
+/// pointer set, for a host that keeps
 /// the callee-saved registers itself and calls this with RDI at the frame.
 pub fn entry() -> alloc::vec::Vec<u8> {
     const TAKE_BLOCK: [u8; 3] = [0x49, 0x89, 0xcb]; // mov r11,rcx
@@ -564,7 +567,9 @@ pub fn entry() -> alloc::vec::Vec<u8> {
     reload(&mut loads);
     let mut stores = Code::new();
     write_back(&mut stores);
-    let mut code = TAKE_BLOCK.to_vec();
+    // RSP stays where the call takes it from, and the store takes R11 first.
+    let mut code = super::chain::EXIT_RSP_STORE.to_vec();
+    code.extend(TAKE_BLOCK);
     code.extend_from_slice(&loads);
     code.extend(CALL_BLOCK);
     code.extend_from_slice(&stores);

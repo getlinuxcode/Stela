@@ -63,6 +63,7 @@ mod faults;
 pub(crate) mod pmu;
 #[cfg(feature = "nvk")]
 mod process_fault;
+pub(crate) mod sampling;
 mod signals;
 pub use bare_host::BareHost;
 use faults::*;
@@ -82,7 +83,9 @@ use stela_boot_core::native_profile as profile;
 use stela_boot_core::ram;
 mod translated;
 pub(crate) use local::activated_base;
-pub(crate) use local::context::RootIdentity;
+#[cfg(feature = "nvk")]
+pub(crate) use local::context::close_moves;
+pub(crate) use local::context::{RootIdentity, moved_here, moves_closed};
 use local::state;
 #[cfg(feature = "nvk")]
 pub(crate) use local::{processor, processors};

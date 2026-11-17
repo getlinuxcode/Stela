@@ -29,7 +29,7 @@ use super::{
     error::Error,
     indirect::IndirectCommandBufferId,
     shader::Compiler,
-    vulkan::backend::{Backend, PreparedImport},
+    vulkan::backend::{Backend, IdleStep, PreparedImport},
 };
 use alloc::{boxed::Box, collections::BTreeMap, format, string::String, vec::Vec};
 use core::{
@@ -381,6 +381,12 @@ pub struct Service<B: Backend, C: Compiler> {
     read_back_started: Option<StartedReadBack>,
     reopen: Option<Reopen<B, C>>,
     prepare: Option<Prepare<B, C>>,
+    /// Lost devices a reopened one replaced, oldest first, each dropped
+    /// once its backend's idle steps end ([`Self::retire_step`]).
+    replaced: Vec<Device<B, C>>,
+    /// Whether a lost device the reopened one replaces is kept unreleased
+    /// ([`Self::keep_lost_devices`]).
+    keep_lost: bool,
 }
 
 impl<B: Backend, C: Compiler> Service<B, C> {
@@ -406,12 +412,23 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             read_back_started: None,
             reopen: None,
             prepare: None,
+            replaced: Vec::new(),
+            keep_lost: false,
         }
     }
 
     /// Serves a new device from `reopen` once a lost one's connections close.
     pub fn with_reopen(mut self, reopen: Reopen<B, C>) -> Self {
         self.reopen = Some(reopen);
+        self
+    }
+
+    /// Keeps each lost device unreleased once a reopened one replaces it,
+    /// for a driver whose release of a device the kernel lost may wait
+    /// without bound: RADV's closes its file, whose close waits for the VM
+    /// work an amdgpu reset holds back, in the turn every client waits on.
+    pub fn keep_lost_devices(mut self) -> Self {
+        self.keep_lost = true;
         self
     }
 
@@ -500,6 +517,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
     /// is after a GPU reset. The lost device keeps what its backend could
     /// not prove stopped.
     fn recover(&mut self) {
+        self.retire_step();
         if !self.device.is_lost()
             || self
                 .connections
@@ -517,7 +535,12 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                     prepare(&mut device);
                 }
                 let clock = self.device.clock();
-                self.device = device;
+                let lost = core::mem::replace(&mut self.device, device);
+                if self.keep_lost {
+                    core::mem::forget(lost);
+                } else {
+                    self.replaced.push(lost);
+                }
                 self.device.set_clock(clock);
                 self.epoch = epoch;
                 self.shares = sharing::Shares::default();
@@ -530,6 +553,26 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                     .push(format!("the lost device did not reopen: {error:?}"));
             }
         }
+    }
+
+    /// One idle step of the oldest replaced device, dropped once it ends: a
+    /// lost device's work may still run, and the processor of the call that
+    /// replaced it takes no guest interrupt meanwhile, so each call waits at
+    /// most one short step ([`Backend::idle_step`]) rather than the whole
+    /// bound at once.
+    fn retire_step(&mut self) {
+        let Some(oldest) = self.replaced.first_mut() else {
+            return;
+        };
+        if oldest.backend().idle_step() != IdleStep::Waiting {
+            drop(self.replaced.remove(0));
+        }
+    }
+
+    /// Lost devices still proving their queues idle.
+    #[cfg(test)]
+    pub(crate) fn retiring_devices(&self) -> usize {
+        self.replaced.len()
     }
 
     /// Gives `connection` the wired guest RAM of `ranges`; the handle goes to

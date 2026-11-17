@@ -8,9 +8,10 @@
 //! highlight, Enter starts the highlighted entry, and an entry's key (`1`-`9`,
 //! then `a`-`z`) starts it at once; a firmware entry restarts the PC into it.
 //! When the first entry, the one `stela.cfg` holds, is the only Mac that
-//! can start now, it starts at once unless a key is held or pressed within
-//! [`GLANCE`], as a Mac shows its startup options only when asked
-//! (`mount_interface::opening`). When there is a choice to make, a
+//! can start now and the PC has no other system on its disks, it starts at
+//! once unless a key is held or pressed within [`GLANCE`], as a Mac shows
+//! its startup options only when asked (`mount_interface::opening`). When
+//! there is a choice to make, such as Windows or Linux beside the Mac, a
 //! countdown from the file's timeout starts the first entry; any key stops
 //! it. A timeout of 0 opens the menu only when a key is already pressed.
 //! A file that cannot be read or parsed is reported and
@@ -396,9 +397,20 @@ impl<'a> Menu<'a> {
                 matches!(item, Item::Choice(n, ChoiceKind::Mac) if readiness[*n] == Readiness::Ready)
             })
             .count();
+        // The PC's other systems, such as Windows or Linux, which the
+        // menu offers beside the Mac.
+        let other_systems = items
+            .iter()
+            .filter(|item| matches!(item, Item::Firmware(entry) if entry.on_disk))
+            .count();
         let opens = match held {
             Some(_) => Opening::Wait,
-            None => opening(choices.timeout_seconds, first_mac, ready_macs),
+            None => opening(
+                choices.timeout_seconds,
+                first_mac,
+                ready_macs,
+                other_systems,
+            ),
         };
         Self {
             choices,

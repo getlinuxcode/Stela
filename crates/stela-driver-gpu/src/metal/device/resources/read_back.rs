@@ -1,4 +1,6 @@
-//! CPU reads of textures whose image only host image copies reach.
+//! CPU reads of textures whose image only host image copies reach, and of
+//! shared textures whose CPU copy holds only the CPU's writes (formats
+//! without host image copy, as depth and stencil formats).
 //!
 //! Such an image lies in device-local memory, which the host maps
 //! uncached or write-combined: a host image copy out of it reads VRAM
@@ -6,7 +8,7 @@
 //! 420x420 texture held the device for 600 ms. Instead the GPU copies the
 //! region into host-cached memory, and the CPU reads it from there once the
 //! copy completes, which the device need not be held for.
-use super::{CpuRows, Strides, stored_len};
+use super::{CpuRows, Strides, gpu_read, stored_len};
 use crate::metal::{
     command_buffer::blit::Region,
     device::{Device, TextureId, pins::Scope},
@@ -107,12 +109,12 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let image = texture.image.ok_or(Error::Invalid(
             "texture buffers are read through their buffer",
         ))?;
-        if texture.cpu_access != CpuAccess::HostImageCopy
-            || texture.cpu_copy.is_some()
-            || rows.packed_bytes == 0
-        {
+        if !gpu_read(texture) || rows.packed_bytes == 0 {
             return Ok(None);
         }
+        // A shared texture's CPU copy holds only the CPU's writes, which
+        // the commit's uploads bring to the image before the copy reads it.
+        let staged = texture.cpu_access == CpuAccess::Staged;
         let format = texture.descriptor.pixel_format;
         let description = format.describe();
         let stored = match description.encoding() {
@@ -134,6 +136,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let Some(host) = self.backend.host_bytes(staging.memory, 0, stored as u64) else {
             // No coherent view of it: the host image copy reads at once.
             self.free_staging(staging);
+            if staged {
+                return Err(Error::Unsupported(
+                    "CPU reads of shared textures without host image copy or coherent host memory",
+                ));
+            }
             return Ok(None);
         };
         let mut commands = self.new_command_buffer();

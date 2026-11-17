@@ -1974,10 +1974,12 @@ fn conditional_exits_branch_over_the_fallthrough_exit() {
     );
     let fallthrough = super::super::chain::direct_exit(GuestAddress(0x1004), ExitKind::Fallthrough);
     let taken = super::super::chain::direct_exit(GuestAddress(0x2000), ExitKind::Direct);
-    assert_eq!(code[..6], [0x0f, 0x85, 24, 0, 0, 0]);
-    assert_eq!(code[6..30], fallthrough);
-    assert_eq!(code[30..], taken);
-    assert_eq!(code.instructions(), 23);
+    assert_eq!(code[..6], [0x0f, 0x85, DIRECT_EXIT_BYTES as u8, 0, 0, 0]);
+    assert_eq!(code[6..6 + DIRECT_EXIT_BYTES], fallthrough);
+    assert_eq!(code[6 + DIRECT_EXIT_BYTES..], taken);
+    // The branch, then MOVABS, MOV, the patch point, the return (one
+    // emission) and four INT3s each.
+    assert_eq!(code.instructions(), 17);
 }
 
 #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
@@ -2038,7 +2040,13 @@ fn grouped_sha256_schedule_removes_only_the_intermediate_frame_round_trip() {
         let separate_bytes = body_bytes(&instructions[..1])
             + body_bytes(&instructions[1..4])
             + body_bytes(&instructions[4..]);
-        assert_eq!(body_bytes(&instructions) + 16, separate_bytes);
+        if target.supports(TargetCpu::Sha) {
+            // The rounds keep V in the block's homes, where SU0's result
+            // makes no frame round trip apart either.
+            assert!(body_bytes(&instructions) < separate_bytes);
+        } else {
+            assert_eq!(body_bytes(&instructions) + 16, separate_bytes);
+        }
 
         if (target.supports(TargetCpu::Sha) && !std::arch::is_x86_feature_detected!("sha"))
             || (target.supports(TargetCpu::Ssse3) && !std::arch::is_x86_feature_detected!("ssse3"))
@@ -2717,8 +2725,9 @@ fn vector_fused_multiply_add_keeps_zero_lanes_in_the_block() {
                 assert_ne!(page as usize, usize::MAX);
                 core::ptr::copy_nonoverlapping(code.as_ptr(), page.cast(), code.len());
                 assert_eq!(mprotect(page, bytes, 5), 0);
-                let entry: unsafe extern "sysv64" fn(*mut GuestState) -> Exit =
-                    core::mem::transmute(page);
+                let entry = |state: *mut crate::GuestState| -> Exit {
+                    crate::x86_64::native::call::<Exit>(page as *const u8, state, 0, 0)
+                };
                 let exit = entry(&mut state);
                 assert_eq!(munmap(page, bytes), 0);
                 exit
@@ -2786,8 +2795,9 @@ fn out_of_line_slow_paths_run_as_the_inline_layout() {
             assert_ne!(page as usize, usize::MAX);
             core::ptr::copy_nonoverlapping(code.as_ptr(), page.cast(), code.len());
             assert_eq!(mprotect(page, bytes, 5), 0);
-            let entry: unsafe extern "sysv64" fn(*mut GuestState) -> Exit =
-                core::mem::transmute(page);
+            let entry = |state: *mut crate::GuestState| -> Exit {
+                crate::x86_64::native::call::<Exit>(page as *const u8, state, 0, 0)
+            };
             let exit = entry(state);
             assert_eq!(munmap(page, bytes), 0);
             exit
@@ -2995,9 +3005,7 @@ fn clock_exit_requests_runtime_service_without_counter_or_guest_writes() {
         );
         let mut expected = vec![0x48, 0xb8];
         expected.extend(pc.0.to_le_bytes());
-        expected.extend([
-            0xba, 7, 0, 0, 0, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
-        ]);
+        expected.extend(super::super::chain::exit_word(7));
         // No RDTSC, host helper address, guessed counter, destination write
         // or placeholder ISB: only the checked runtime service may complete.
         assert_eq!(native.x86_64_code, expected);
@@ -3039,9 +3047,7 @@ fn pac_helper_exit_has_no_guest_writes_or_embedded_service_address() {
         );
         let mut expected = vec![0x48, 0xb8];
         expected.extend(pc.0.to_le_bytes());
-        expected.extend([
-            0xba, 6, 0, 0, 0, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
-        ]);
+        expected.extend(super::super::chain::exit_word(6));
         // Only the SysV return registers RAX/RDX are touched, including for
         // RETAB: the runtime must keep signed LR while authenticating target.
         assert_eq!(native.x86_64_code, expected);
@@ -3078,9 +3084,7 @@ fn ordinary_native_prefix_is_preserved_before_pac_boundary() {
     assert_eq!(native.source_map[1].0, pc);
     assert_eq!(
         &native.x86_64_code[native.x86_64_code.len() - DYNAMIC_EXIT_BYTES..],
-        &[
-            0xba, 6, 0, 0, 0, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc
-        ]
+        super::super::chain::exit_word(6)
     );
 }
 
@@ -3105,9 +3109,7 @@ fn trap_exit_uses_instruction_pc_and_only_native_return_scratch_registers() {
         );
         let mut expected = vec![0x48, 0xb8]; // movabs rax,instruction_pc
         expected.extend(pc.0.to_le_bytes());
-        expected.extend([
-            0xba, 5, 0, 0, 0, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
-        ]); // mov edx,Trap; ret
+        expected.extend(super::super::chain::exit_word(5)); // mov edx,Trap; ret
         assert_eq!(native.x86_64_code, expected);
         assert_eq!(native.source_map, [(pc, 0)]);
     }
@@ -3908,4 +3910,51 @@ fn wide_moves_match_the_model_in_every_form() {
         }
     }
     assert!(runs > 2000, "{runs}");
+}
+
+/// A system-mode block's cold range (`CompiledBlock::cold`), which
+/// `--profile`'s host samples tell apart, covers its out-of-line slow paths:
+/// it starts after the jump over them, the jumps over its parts reach its
+/// end, and no instruction's inline code starts in it. A block without slow
+/// paths has none.
+#[test]
+fn cold_ranges_cover_the_code_behind_the_jumps_over_it() {
+    use crate::{
+        Options, TargetCpu,
+        block::{BlockProfile, CompilationPlan, Features},
+    };
+    let compile = |words: &[u32]| {
+        let source: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let options = Options::new(
+            BlockProfile::new(Features::SYSTEM_MODE),
+            TargetCpu::Baseline,
+        );
+        CompilationPlan::new(&source, GuestAddress(0x1000), &options)
+            .unwrap()
+            .compile()
+            .unwrap()
+    };
+    let block = compile(&[
+        0x1e21_0802, // fmul s2,s0,s1
+        0x1e20_2843, // fadd s3,s2,s0
+        0x1e20_1909, // fdiv s9,s8,s0
+        0x1e61_c0d3, // fsqrt d19,d6
+        0x9100_0400, // add x0,x0,#1
+    ]);
+    let (start, end) = (block.cold.0 as usize, block.cold.1 as usize);
+    assert!(start < end, "slow paths out of line: {:?}", block.cold);
+    let code = &block.native.x86_64_code;
+    assert!(end <= code.len());
+    let jump = start - super::super::chain::JUMP_BYTES;
+    assert_eq!(code[jump], 0xe9, "a jump over the cold code");
+    let mut target = target_of(code, jump + 1);
+    while target < end {
+        assert_eq!(code[target], 0xe9, "a jump over the next cold part");
+        target = target_of(code, target + 1);
+    }
+    assert_eq!(target, end);
+    for &(_, offset) in &block.native.source_map {
+        assert!(!(start..end).contains(&offset), "inline code at {offset}");
+    }
+    assert_eq!(compile(&[0x9100_0400, 0x9100_0421]).cold, (0, 0));
 }

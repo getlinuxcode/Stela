@@ -19,10 +19,11 @@ pub enum HostCall {
     Wake = 9,
     Export = 10,
     Shutdown = 11,
+    Seek = 12,
 }
 
 impl HostCall {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 12] = [
         Self::Open,
         Self::Close,
         Self::Duplicate,
@@ -34,6 +35,7 @@ impl HostCall {
         Self::Wake,
         Self::Export,
         Self::Shutdown,
+        Self::Seek,
     ];
 
     pub const fn code(self) -> u32 {
@@ -53,6 +55,7 @@ impl HostCall {
             Self::Wake => "wake",
             Self::Export => "export",
             Self::Shutdown => "shutdown",
+            Self::Seek => "seek",
         }
     }
 }

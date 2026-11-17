@@ -4,9 +4,11 @@
  * coverage sweep of the Metal device's bring-up. Each argument is an
  * .air module from Apple's `metal -c`; the inputs are never committed.
  *
- *   stela_metal_corpus [--sm SM] [--fill BYTE] [--entry NAME] [--nir FILE] MODULE.air...
+ *   stela_metal_corpus [--sm SM] [--fill BYTE] [--entry NAME] [--nir FILE] [--nak 1]
+ *                      MODULE.air...
  *
  * --entry compiles only that entry point, and --nir writes its NIR to FILE.
+ * --nak 1 also reports NAK's statistics for each kernel (NVIDIA builds).
  * Built with STELA_METAL_CORPUS_AMD, the tool takes --gpu FAMILY instead of
  * --sm and compiles with RADV's NIR options (amd/tests/metal_corpus_target.h).
  *
@@ -16,10 +18,15 @@
  * a post-tessellation vertex function takes its patch's default
  * tessellation, and each of its attributes a buffer of its own; required
  * function constants take zero, and with --fill every function constant
- * takes that byte, reaching what the constants otherwise disable. Exits
- * nonzero when any entry point is refused. */
+ * takes that byte, reaching what the constants otherwise disable. With
+ * --nak 1, each kernel without textures or samplers is also compiled by
+ * NAK, its push constants read as global constants, and a line reports
+ * NAK's statistics and its global and local memory instructions by order:
+ * a census of the code, never a measurement of a GPU. Exits nonzero when
+ * any entry point is refused. */
 #include "compiler/glsl_types.h"
 #include "compiler/metal_compiler.h"
+#include "compiler/nir/nir_builder.h"
 #include "llvm-c/BitReader.h"
 #include "compiler/nir/nir.h"
 #include "llvm-c/Core.h"
@@ -77,6 +84,9 @@ static struct stela_metal_reflection reflection;
 static struct stela_air_constant_value constants[STELA_METAL_FUNCTION_CONSTANTS];
 static unsigned constant_count;
 static int fill = -1;
+#ifndef STELA_METAL_CORPUS_AMD
+static struct nak_compiler *census;
+#endif
 
 /* The module's bitcode, unwrapped from an LLVM bitcode wrapper. */
 static const uint8_t *
@@ -224,6 +234,106 @@ compile(const uint8_t *air, size_t size, const char *entry,
    return stela_metal_compile(air, size, entry, target, &specialization, error);
 }
 
+#ifndef STELA_METAL_CORPUS_AMD
+/* Push constants as global constant loads and images as bindless handles,
+ * the bindings the driver's lowering gives a kernel. */
+static bool
+stand_in_bindings(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
+{
+   (void)data;
+   b->cursor = nir_before_instr(&intrin->instr);
+   switch (intrin->intrinsic) {
+   case nir_intrinsic_load_push_constant: {
+      nir_def *address = nir_iadd_imm(b, nir_u2u64(b, intrin->src[0].ssa),
+                                      0x100000 + nir_intrinsic_base(intrin));
+      nir_def_replace(&intrin->def, nir_load_global_constant(b, intrin->def.num_components,
+                                                             intrin->def.bit_size, address,
+                                                             .align_mul = 4));
+      return true;
+   }
+   case nir_intrinsic_image_deref_load:
+   case nir_intrinsic_image_deref_store:
+   case nir_intrinsic_image_deref_size:
+   case nir_intrinsic_image_deref_samples:
+   case nir_intrinsic_image_deref_atomic:
+   case nir_intrinsic_image_deref_atomic_swap: {
+      nir_deref_instr *deref = nir_src_as_deref(intrin->src[0]);
+      nir_def *handle = deref->deref_type == nir_deref_type_array ?
+                           nir_u2u32(b, deref->arr.index.ssa) : nir_imm_int(b, 0);
+      nir_rewrite_image_intrinsic(intrin, handle, nir_image_intrinsic_type_bindless);
+      return true;
+   }
+   default:
+      return false;
+   }
+}
+
+static bool
+samples(nir_shader *shader)
+{
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_tex)
+               return true;
+         }
+      }
+   }
+   return false;
+}
+
+/* Lines of a NAK listing holding `op` and, after it, `order`. */
+static unsigned
+count(const char *listing, const char *op, const char *order)
+{
+   unsigned n = 0;
+   for (const char *line = listing; line && *line;) {
+      const char *end = strchr(line, '\n');
+      char text[256];
+      snprintf(text, sizeof(text), "%.*s", end ? (int)(end - line) : (int)strlen(line), line);
+      const char *at = strstr(text, op);
+      n += at && (!order || strstr(at, order));
+      line = end ? end + 1 : NULL;
+   }
+   return n;
+}
+
+/* NAK's statistics for a translated kernel; consumes shader's code. */
+static void
+report_nak(const char *path, const char *entry, nir_shader *shader)
+{
+   if (reflection.stage != STELA_METAL_KERNEL || samples(shader)) {
+      printf("%s %s: nak skipped\n", path, entry);
+      return;
+   }
+   nir_shader_intrinsics_pass(shader, stand_in_bindings, nir_metadata_control_flow, NULL);
+   nir_opt_dce(shader);
+   nir_remove_dead_derefs(shader);
+   nir_remove_dead_variables(shader, nir_var_image | nir_var_uniform, NULL);
+   const nir_lower_compute_system_values_options system_values = {
+      .lower_local_invocation_index = true,
+   };
+   nir_lower_compute_system_values(shader, &system_values);
+   nak_preprocess_nir(shader, census);
+   struct nak_shader_bin *bin = nak_compile_shader(shader, true, census, 0, NULL, false);
+   if (!bin) {
+      printf("%s %s: nak refused\n", path, entry);
+      return;
+   }
+   const char *a = bin->asm_str;
+   printf("%s %s: nak instrs=%u static_cycles=%llu gprs=%u warps=%u slm=%u spills=%u fills=%u "
+          "st.weak=%u st.strong=%u ld.weak=%u ld.strong=%u ld.constant=%u local=%u\n",
+          path, entry, bin->info.num_instrs, (unsigned long long)bin->info.num_static_cycles,
+          bin->info.num_gprs, bin->info.max_warps_per_sm, bin->info.slm_size,
+          bin->info.num_spills_to_mem, bin->info.num_fills_from_mem,
+          count(a, "st.global", ".weak"), count(a, "st.global", ".strong"),
+          count(a, "ld.global", ".weak"), count(a, "ld.global", ".strong"),
+          count(a, "ld.global", ".constant"), count(a, ".local", NULL));
+   nak_shader_bin_destroy(bin);
+}
+
+#endif
+
 static unsigned
 sweep(const char *path, const struct stela_metal_target *target)
 {
@@ -291,6 +401,10 @@ sweep(const char *path, const struct stela_metal_target *target)
                printf("%s: unwritable\n", nir_path);
                refused++;
             }
+#ifndef STELA_METAL_CORPUS_AMD
+            if (census && !tile)
+               report_nak(path, entry, shader);
+#endif
             stela_metal_release(shader);
          } else {
             printf("%s %s: refused (%u): %s\n", path, entry, error.kind, error.detail);
@@ -312,6 +426,7 @@ int
 main(int argc, char **argv)
 {
    const char *target_name = STELA_CORPUS_TARGET_DEFAULT;
+   bool nak_census = false;
    int first = 1;
    while (first + 1 < argc && !strncmp(argv[first], "--", 2)) {
       if (!strcmp(argv[first], STELA_CORPUS_TARGET_OPTION))
@@ -322,13 +437,15 @@ main(int argc, char **argv)
          only_entry = argv[first + 1];
       else if (!strcmp(argv[first], "--nir"))
          nir_path = argv[first + 1];
+      else if (!strcmp(argv[first], "--nak"))
+         nak_census = atoi(argv[first + 1]) != 0;
       else
          break;
       first += 2;
    }
    if (first >= argc) {
       fprintf(stderr, "usage: %s [" STELA_CORPUS_TARGET_OPTION " TARGET] [--fill BYTE] "
-              "[--entry NAME] [--nir FILE] MODULE.air...\n", argv[0]);
+              "[--entry NAME] [--nir FILE] [--nak 1] MODULE.air...\n", argv[0]);
       return 2;
    }
    glsl_type_singleton_init_or_ref();
@@ -337,6 +454,11 @@ main(int argc, char **argv)
       glsl_type_singleton_decref();
       return 2;
    }
+#ifndef STELA_METAL_CORPUS_AMD
+   census = nak_census ? stela_corpus_nak : NULL;
+#else
+   (void)nak_census;
+#endif
    unsigned refused = 0;
    for (int i = first; i < argc; i++)
       refused += sweep(argv[i], &target);

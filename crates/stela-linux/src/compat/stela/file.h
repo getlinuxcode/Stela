@@ -30,6 +30,9 @@ void stela_linux_fd_close(int fd);
 int stela_linux_open(dev_t device, unsigned int flags);
 int stela_linux_fd_dup(int fd);
 long stela_linux_fd_device(int fd);
+/* The descriptor's llseek: a dma-buf answers its size at SEEK_END, as libdrm
+ * asks before importing one. The new offset, or a negative errno. */
+long long stela_linux_fd_seek(int fd, long long offset, int whence);
 long stela_linux_ioctl(int fd, unsigned int request, void *argument);
 /* Sleep while *word holds value, for at most `nanoseconds` (U64_MAX: no limit).
  * A client's thread is a Linux task, whose lock holders can run only if it does. */

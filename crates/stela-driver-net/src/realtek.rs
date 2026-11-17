@@ -502,15 +502,13 @@ impl RuntimeLink {
             // genphy_update_link's polled BMCR/BMSR sequence preserves a
             // latch-low drop while up, and retries a low sample while down.
             // A 10 ms cache keeps PHY polling out of the per-packet fast path.
+            // A register that reads all ones is taken as read, as Linux
+            // does: a BMCR of all ones has its restart bit set, so the link
+            // reads down until a later poll. Only a PHY access that does not
+            // complete, or a function whose registers read all ones, ends
+            // link polling, as phylib's PHY_ERROR state does.
             (|| {
-                let read = |reg| {
-                    let value = hw.phy_read(reg)?;
-                    if value == u16::MAX {
-                        Err(BlockError::Device { status: 65535 })
-                    } else {
-                        Ok(value)
-                    }
-                };
+                let read = |reg| hw.phy_read(reg);
                 if read(PHY_CONTROL)? & BMCR_RESTART_AUTONEGOTIATION != 0 {
                     return Ok(0);
                 }

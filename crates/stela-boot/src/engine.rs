@@ -35,6 +35,7 @@ pub(crate) use kernel_work::FirmwareContext;
 mod network;
 pub(crate) mod nor;
 mod parallel;
+mod pci_power;
 #[cfg(feature = "nvk")]
 pub(crate) mod pipelines;
 pub(crate) mod power;

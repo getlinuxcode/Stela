@@ -209,7 +209,11 @@ pub(super) fn wait_gone() -> bool {
 unsafe extern "C" fn run(argument: *mut c_void) {
     // SAFETY: `start` gave this thread the box.
     let watch = unsafe { Box::from_raw(argument.cast::<Watch>()) };
-    let Some(file) = client::open_node(client::RENDER_MINOR) else {
+    // A render node of the service's own GPU.
+    let Some(file) = gate::served_gpu(watch.service)
+        .and_then(client::minor)
+        .and_then(|minor| client::open_node(client::RENDER_MINOR + minor))
+    else {
         client::close_descriptor(watch.fd);
         ended(&watch);
         return;

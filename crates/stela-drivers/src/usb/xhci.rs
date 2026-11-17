@@ -108,6 +108,7 @@ pub use enumerate::PortProbe;
 pub use identity::{DeviceAccess, DeviceRef, SlotId};
 pub use iso::{IsoCompletion, IsoSchedule, IsoStatus, IsoTransfer};
 pub use lifecycle::{Changes, Host};
+pub(crate) use reset::departed;
 use ring::{Event, Ring};
 pub use streams::StreamTransfer;
 pub use transfer::{Operation, TransferCancellation, TransferTicket};

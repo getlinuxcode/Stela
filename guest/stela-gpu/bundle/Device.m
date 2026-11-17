@@ -882,15 +882,21 @@ TABLE(maxVertexAttributes, 31)
 }
 
 /* Core Animation holds a surface's rows to this as well as its base. A base is
- * always a page, so only a row's alignment limits a surface. */
+ * always a page, so only a row's alignment limits a surface. Rows the GPU's
+ * linear images cannot take go through an aligned copy, read or written, so
+ * this is the linear images' alignment only up to NVIDIA's 32 bytes: Core Image
+ * makes no texture of a surface whose rows miss it, and an image processor
+ * given none aborts (an MPS blur's "source may not be nil", from RADV's
+ * 256-byte linear rows against an icon's 64- to 384-byte ones). */
 - (NSUInteger)iosurfaceTextureAlignmentBytes
 {
-	return _capabilities->linear_row_alignment;
+	return _capabilities->surface_row_alignment;
 }
 
+/* As a written surface's rows: a read goes through the same aligned copy. */
 - (NSUInteger)iosurfaceReadOnlyTextureAlignmentBytes
 {
-	return _capabilities->linear_row_alignment;
+	return _capabilities->surface_row_alignment;
 }
 
 /* What wiring a client's pages needs of them. */

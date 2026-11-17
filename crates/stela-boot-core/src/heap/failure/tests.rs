@@ -1,8 +1,9 @@
 use super::*;
 use core::{alloc::GlobalAlloc, fmt::Write};
 
-#[repr(align(4096))]
-struct Ram([u8; 4096]);
+/// Two of the smallest class's slabs, at their alignment.
+#[repr(align(16384))]
+struct Ram([u8; 32768]);
 struct Text {
     bytes: [u8; 512],
     used: usize,
@@ -43,7 +44,7 @@ fn record(report: fmt::Arguments<'_>) {
 #[test]
 fn first_exhaustion_reports_once_without_allocating() {
     let heap = Heap::new().reporting_failures(record);
-    let mut ram = Ram([0; 4096]);
+    let mut ram = Ram([0; 32768]);
     // SAFETY: fresh exclusive aligned stack storage outlives this heap/model.
     unsafe { heap.initialize(ram.0.as_mut_ptr(), ram.0.len()) };
     let layout = Layout::from_size_align(16, 16).unwrap();
@@ -54,12 +55,12 @@ fn first_exhaustion_reports_once_without_allocating() {
     let reported = REPORTED.with(|text| text.borrow().as_str().to_owned());
     assert!(reported.contains("bytes=16 align=16 snapshot=locked-metadata"));
     assert!(reported.contains("live_estimate="));
-    assert!(reported.contains("cpu_counters=relaxed total=4096"));
+    assert!(reported.contains("cpu_counters=relaxed total=32768"));
     assert!(reported.contains("largest=0\nHEAP AT FAILURE large classes 16:0M"));
     let first = heap.first_failure().unwrap();
     assert_eq!((first.bytes, first.align), (16, 16));
     let found = first.heap.unwrap();
-    assert_eq!((found.total, found.largest), (4096, 0));
+    assert_eq!((found.total, found.largest), (32768, 0));
     assert!(found.live <= found.carved && found.carved <= found.total);
     // SAFETY: as above; this second failure must not report again, and the
     // first stays the one named.

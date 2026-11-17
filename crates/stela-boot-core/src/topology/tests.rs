@@ -451,6 +451,36 @@ fn disabled_and_unhealthy_aps_cannot_supply_guest_capacity() {
 }
 
 #[test]
+fn health_bits_that_mark_the_running_bootstrap_processor_unhealthy_leave_no_ap_out() {
+    // Firmware that marks every processor unhealthy, the BSP included.
+    let mut cores = [
+        processor(0, 0, 0, 0),
+        processor(1, 0, 1, 0),
+        processor(2, 0, 2, 0),
+    ];
+    for core in &mut cores {
+        core.flags = ENABLED;
+    }
+    cores[0].flags |= BSP;
+    assert_eq!(select(&cores), Ok(alloc::vec![0]));
+    assert!(ignore_unreported_health(&mut cores));
+    assert_eq!(select(&cores), Ok(alloc::vec![0, 1, 2]));
+    // A disabled processor stays out.
+    cores[2].flags = ENABLED | BSP;
+    cores[0].flags = HEALTHY;
+    cores[1].flags = ENABLED;
+    assert!(ignore_unreported_health(&mut cores));
+    assert_eq!(select(&cores), Ok(alloc::vec![2, 1]));
+    // With a healthy BSP, an AP marked unhealthy stays out.
+    let mut cores = [processor(0, 0, 0, 0), processor(1, 0, 1, 0)];
+    cores[0].flags |= BSP;
+    cores[1].flags = ENABLED;
+    assert!(!ignore_unreported_health(&mut cores));
+    assert_eq!(cores[1].flags, ENABLED);
+    assert_eq!(select(&cores), Ok(alloc::vec![0]));
+}
+
+#[test]
 fn invalid_and_ambiguous_source_identity_refuses_instead_of_oversubscribing() {
     let mut cores = [processor(0, 0, 0, 0), processor(1, 0, 1, 0)];
     assert_eq!(select(&cores), Err(Refusal::NoBootstrapProcessor));

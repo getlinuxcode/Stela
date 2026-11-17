@@ -1,24 +1,32 @@
-From f004130231b36e7f2925436034954fc7d4917700 Mon Sep 17 00:00:00 2001
+From 253888824198e9c96999567220b4f02a7e9d1d9f Mon Sep 17 00:00:00 2001
 From: Stela contributor <contributor@example.invalid>
-Date: Mon, 16 Nov 2026 19:17:25 +0100
-Subject: [PATCH] radv: take external NIR's texture and image accesses as
+Date: Tue, 17 Nov 2026 10:49:06 +0100
+Subject: [PATCH] radv: take given NIR's texture and image accesses as
  non-uniform until shown uniform
 
+Metal lets every lane of a wave reach its own texture, sampler or image
+through an argument buffer, which Vulkan allows only for accesses qualified
+non-uniform. RADV waterfalls only accesses flagged ACCESS_NON_UNIFORM or
+texture_non_uniform, so a NIR shader given in
+VkPipelineShaderStageNirCreateInfoMESA reads every lane's descriptor from
+the first lane's. Flag every such access; nir_opt_non_uniform_access, which
+RADV's pipeline runs, clears the flag wherever divergence analysis proves
+the handle uniform.
 ---
  src/amd/vulkan/radv_shader.c | 24 ++++++++++++++++++++++++
  1 file changed, 24 insertions(+)
 
 diff --git a/src/amd/vulkan/radv_shader.c b/src/amd/vulkan/radv_shader.c
-index 0c3cea5..c11e45b 100644
+index 1523756..6892d03 100644
 --- a/src/amd/vulkan/radv_shader.c
 +++ b/src/amd/vulkan/radv_shader.c
-@@ -473,6 +473,29 @@ ycbcr_conversion_lookup(const void *data, uint32_t set, uint32_t binding, uint32
- /* load_global(_constant)_bounded, which ACO does not select: the load when
-  * every byte lies below the bound, zero otherwise, as nir_lower_explicit_io
-  * guards robust loads. */
+@@ -470,6 +470,29 @@ ycbcr_conversion_lookup(const void *data, uint32_t set, uint32_t binding, uint32
+    }
+ }
+ 
 +/* Metal lets every lane of a wave reach its own texture, sampler or image
 + * through an argument buffer, as Vulkan does only for non-uniform-qualified
-+ * accesses: each access of external NIR is taken as non-uniform, and
++ * accesses: each access of NIR given to RADV is taken as non-uniform, and
 + * nir_opt_non_uniform_access keeps the flag only where the handle diverges.
 + */
 +static bool
@@ -39,17 +47,17 @@ index 0c3cea5..c11e45b 100644
 +   return true;
 +}
 +
- static bool
- lower_bounded_load(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
- {
-@@ -546,6 +569,7 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct
-             NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_bounded_load, nir_metadata_none, NULL);
-          NIR_PASS(_, nir, nir_lower_doubles, NULL, nir->options->lower_doubles_options);
-          NIR_PASS(_, nir, nir_normalize_sin_cos);
-+         NIR_PASS(_, nir, nir_shader_instructions_pass, flag_non_uniform, nir_metadata_all, NULL);
-       }
-    } else {
-       uint32_t *spirv = (uint32_t *)stage->spirv.data;
+ nir_shader *
+ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct radv_shader_stage *stage,
+                          const struct radv_spirv_to_nir_options *options, bool is_internal)
+@@ -502,6 +525,7 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct
+        * in the normalized form, and doubles only as the options lower them. */
+       NIR_PASS(_, nir, nir_lower_doubles, NULL, nir->options->lower_doubles_options);
+       NIR_PASS(_, nir, nir_normalize_sin_cos);
++      NIR_PASS(_, nir, nir_shader_instructions_pass, flag_non_uniform, nir_metadata_all, NULL);
+ 
+       assert(exec_list_length(&nir->functions) == 1);
+       radv_shader_choose_subgroup_size(compiler_info, nir, &stage->key, 0);
 -- 
 2.43.0
 

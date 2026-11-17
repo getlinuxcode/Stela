@@ -4,6 +4,7 @@ use alloc::{vec, vec::Vec};
 mod outputs;
 mod power;
 mod reconnect;
+mod scaling;
 mod scanout;
 
 fn mode(width: u16, height: u16, kind: u32) -> ModeInfo {
@@ -52,6 +53,11 @@ struct Card {
     first_crtcs: u32,
     /// The first connector lists encoder 60, the second's.
     shared_encoder: bool,
+    /// Both connectors are a DisplayPort hub's outputs (MST): each lists
+    /// encoders 62 and 63, one a controller, each reaching both.
+    mst: bool,
+    /// Connector 50's and 51's kind and number among their kind.
+    ports: [(u32, u32); 2],
     /// The connector the driver read back as lit, with a current encoder.
     lit: u32,
     /// Controller 40's mode and framebuffer, its flips, and the requests to
@@ -83,10 +89,29 @@ struct Card {
     set_error: Option<i64>,
     /// Mappings to refuse.
     map_refusals: u32,
+    /// What a sequence request answers: whether the controller is on and
+    /// its last vertical blank's time; and the controllers asked.
+    vblank: Option<(u32, i64)>,
+    sequences: Vec<u32>,
     /// Dumb buffers and framebuffers given back, and mappings removed.
     destroyed: Vec<u32>,
     removed: Vec<u32>,
     unmapped: usize,
+    /// Both connectors offer DRM's "scaling mode" as property 70, besides
+    /// property 69, "DPMS", and property 71, "EDID", which every connector
+    /// offers.
+    scaler: bool,
+    /// Connector 50's and 51's EDID, blobs 90 and 91; none is blob 0.
+    edids: [Option<Vec<u8>>; 2],
+    /// Connector 50's and 51's scaling mode.
+    scaling: [u64; 2],
+    /// Scaling modes set, by connector, and the property reads.
+    scalings: Vec<(u32, u64)>,
+    property_reads: u32,
+    /// What the next scaling mode set answers instead.
+    scaling_error: Option<i64>,
+    /// Each controller lit, with its connector's scaling mode then.
+    lit_scaling: Vec<(u32, u64)>,
 }
 
 impl Card {
@@ -100,6 +125,8 @@ impl Card {
             first_connected: false,
             first_crtcs: 0b11,
             shared_encoder: false,
+            mst: false,
+            ports: [(0, 0); 2],
             lit: 0,
             set_40: None,
             flips_40: Vec::new(),
@@ -120,10 +147,25 @@ impl Card {
             mode_sets: 0,
             set_error: None,
             map_refusals: 0,
+            vblank: None,
+            sequences: Vec::new(),
             destroyed: Vec::new(),
             removed: Vec::new(),
             unmapped: 0,
+            scaler: false,
+            edids: [None, None],
+            scaling: [SCALE_NONE; 2],
+            scalings: Vec::new(),
+            property_reads: 0,
+            scaling_error: None,
+            lit_scaling: Vec::new(),
         }
+    }
+
+    /// Requests about connector properties other than the EDID: none
+    /// where nothing is scaled.
+    fn property_requests(&self) -> usize {
+        self.property_reads as usize + self.scalings.len()
     }
 
     fn id(&mut self) -> u32 {
@@ -167,6 +209,8 @@ unsafe impl Drm for &mut Card {
                         _ => (self.connected, &self.modes, 60),
                     };
                     connector.connection = if connected { CONNECTED } else { 2 };
+                    let port = self.ports.get(connector.id.wrapping_sub(50) as usize);
+                    (connector.kind, connector.kind_id) = port.copied().unwrap_or_default();
                     connector.encoder = if connector.id == self.lit { encoder } else { 0 };
                     let modes: &[ModeInfo] = if connected { listed } else { &[] };
                     self.probes += u32::from(connector.mode_count == 0);
@@ -175,11 +219,16 @@ unsafe impl Drm for &mut Card {
                         let list = connector.modes as *mut ModeInfo;
                         ptr::copy_nonoverlapping(modes.as_ptr(), list, modes.len());
                     }
-                    if connector.encoder_count != 0 {
-                        (connector.encoders as *mut u32).write(encoder);
+                    let encoders: &[u32] = match self.mst {
+                        true => &[62, 63],
+                        false => &[encoder],
+                    };
+                    if connector.encoder_count as usize >= encoders.len() {
+                        let list = connector.encoders as *mut u32;
+                        ptr::copy_nonoverlapping(encoders.as_ptr(), list, encoders.len());
                     }
                     connector.mode_count = modes.len() as u32;
-                    connector.encoder_count = 1;
+                    connector.encoder_count = encoders.len() as u32;
                     if connected && connector.modes != 0 && self.mode_changes != 0 {
                         self.mode_changes -= 1;
                         connector.mode_count += 1;
@@ -190,6 +239,7 @@ unsafe impl Drm for &mut Card {
                     encoder.possible_crtcs = match encoder.id {
                         60 => self.possible_crtcs,
                         61 => self.first_crtcs,
+                        62 | 63 if self.mst => 0b11,
                         other => panic!("encoder {other}"),
                     };
                 }
@@ -232,6 +282,80 @@ unsafe impl Drm for &mut Card {
                         assert_eq!((crtc.connectors as *const u32).read(), runs);
                         (crtc.mode, crtc.framebuffer)
                     });
+                    if crtc.connector_count != 0 {
+                        let scaling = self.scaling[(runs - 50) as usize];
+                        self.lit_scaling.push((crtc.id, scaling));
+                    }
+                }
+                OBJECT_PROPERTIES => {
+                    let object = &mut *argument.cast::<ObjectProperties>();
+                    assert_eq!(object.kind, OBJECT_CONNECTOR);
+                    assert!(matches!(object.id, 50 | 51));
+                    let offered: &[u32] = if self.scaler {
+                        &[71, 69, 70]
+                    } else {
+                        &[71, 69]
+                    };
+                    let index = (object.id - 50) as usize;
+                    let edid = self.edids[index].as_ref().map_or(0, |_| 90 + index as u64);
+                    if object.count as usize >= offered.len() {
+                        let list = object.properties as *mut u32;
+                        ptr::copy_nonoverlapping(offered.as_ptr(), list, offered.len());
+                        let values = object.values as *mut u64;
+                        for (at, &property) in offered.iter().enumerate() {
+                            values.add(at).write(if property == 71 { edid } else { 0 });
+                        }
+                    }
+                    object.count = offered.len() as u32;
+                }
+                GET_PROPERTY => {
+                    let info = &mut *argument.cast::<PropertyInfo>();
+                    let name: &[u8] = match info.id {
+                        69 => b"DPMS",
+                        70 => SCALING_MODE,
+                        71 => EDID,
+                        other => panic!("property {other}"),
+                    };
+                    self.property_reads += u32::from(info.id != 71);
+                    info.name = [0; 32];
+                    info.name[..name.len()].copy_from_slice(name);
+                    let values = info.values as *mut u64;
+                    for value in 0..4u32.min(info.value_count) {
+                        values.add(value as usize).write(u64::from(value));
+                    }
+                    info.value_count = 4;
+                }
+                GET_BLOB => {
+                    let blob = &mut *argument.cast::<Blob>();
+                    let Some(Some(edid)) = blob
+                        .id
+                        .checked_sub(90)
+                        .and_then(|index| self.edids.get(index as usize))
+                    else {
+                        return -2;
+                    };
+                    // Linux copies only when the length asked is the blob's.
+                    if blob.length as usize == edid.len() {
+                        ptr::copy_nonoverlapping(edid.as_ptr(), blob.data as *mut u8, edid.len());
+                    }
+                    blob.length = edid.len() as u32;
+                }
+                SET_OBJECT_PROPERTY => {
+                    let set = *argument.cast::<SetProperty>();
+                    assert_eq!((set.kind, set.id), (OBJECT_CONNECTOR, 70));
+                    assert!(self.scaler);
+                    // Only a connector that runs no controller.
+                    let runs = match set.object {
+                        50 => self.set_40.is_some(),
+                        51 => self.set.is_some(),
+                        other => panic!("connector {other}"),
+                    };
+                    assert!(!runs, "scaling set on a connector a controller runs");
+                    if let Some(error) = self.scaling_error.take() {
+                        return error;
+                    }
+                    self.scaling[(set.object - 50) as usize] = set.value;
+                    self.scalings.push((set.object, set.value));
                 }
                 PAGE_FLIP => {
                     assert!(self.immediate, "a flip requested where it must wait");
@@ -250,6 +374,17 @@ unsafe impl Drm for &mut Card {
                         return BUSY;
                     }
                     flips.push(flip.framebuffer);
+                }
+                CRTC_GET_SEQUENCE => {
+                    assert!(self.immediate, "a sequence asked where it must wait");
+                    let sequence = &mut *argument.cast::<CrtcSequence>();
+                    self.sequences.push(sequence.crtc);
+                    let Some((active, ns)) = self.vblank else {
+                        return -22;
+                    };
+                    sequence.active = active;
+                    sequence.sequence = 7;
+                    sequence.sequence_ns = ns;
                 }
                 REMOVE_FB => self.removed.push(*argument.cast::<u32>()),
                 DESTROY_DUMB => self
@@ -296,6 +431,9 @@ fn requests_match_linux() {
     assert_eq!(ADD_FB2, 0xc068_64b8);
     assert_eq!(REMOVE_FB, 0xc004_64af);
     assert_eq!(DESTROY_DUMB, 0xc004_64b4);
+    assert_eq!(GET_PROPERTY, 0xc040_64aa);
+    assert_eq!(OBJECT_PROPERTIES, 0xc020_64b9);
+    assert_eq!(SET_OBJECT_PROPERTY, 0xc018_64ba);
 }
 
 #[test]
@@ -337,11 +475,24 @@ fn a_display_taken_at_start_runs_the_monitors_own_mode() {
     ];
     let any: Fits<'_> = &|_, _, _| true;
     let firmware = Wanted::Native((1920, 1080));
-    assert_eq!(choose(&modes, firmware, any), Some(modes[0]));
+    // The preferred timing is the monitor's 60 Hz one, listed first as
+    // Linux sorts it; its 144 Hz mode of the same size runs.
+    assert_eq!(choose(&modes, firmware, any), Some(modes[1]));
     assert_eq!(
         choose(&modes, Wanted::Size((1920, 1080)), any),
         Some(modes[2])
     );
+    // An interlaced mode is passed over, however fast; equals keep the
+    // first listed.
+    let laced = [
+        modes[0],
+        ModeInfo {
+            flags: INTERLACED,
+            ..at(3840, 2160, 0, 120)
+        },
+        at(3840, 2160, 0, 60),
+    ];
+    assert_eq!(choose(&laced, firmware, any), Some(laced[0]));
     // The native size cannot be described at all: the firmware's size.
     let small: Fits<'_> = &|width, _, _| width < 3840;
     assert_eq!(choose(&modes, firmware, small), Some(modes[2]));

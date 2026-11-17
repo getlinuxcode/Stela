@@ -37,6 +37,15 @@ impl Access {
             Ok(_) | Err(RETIRED)
         )
     }
+
+    /// Open admission again after [`Self::retire`], for an owner that
+    /// retired the framebuffer and then never touched the device showing it:
+    /// the picture is still scanned out. False if it was not retired.
+    pub fn restore(&self) -> bool {
+        self.0
+            .compare_exchange(RETIRED, IDLE, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
 }
 
 impl Default for Access {
@@ -275,6 +284,21 @@ mod tests {
         assert!(access.retire());
         assert!(access.is_retired());
         assert!(access.enter().is_none());
+        assert!(access.retire());
+    }
+
+    #[test]
+    fn a_retired_framebuffer_restored_admits_writers_again() {
+        let access = Access::new();
+        // Nothing to restore before a retirement.
+        assert!(!access.restore());
+        assert!(access.retire());
+        assert!(access.restore());
+        assert!(!access.is_retired());
+        let writer = access.enter().unwrap();
+        // A restore never takes over a writer's admission.
+        assert!(!access.restore());
+        drop(writer);
         assert!(access.retire());
     }
 

@@ -234,6 +234,52 @@ fn a_16_gib_pc_takes_the_heap_target_from_its_guest() {
     assert!(sizes.guest >= GUEST_ROOM, "{sizes:?}");
 }
 
+/// What a 16 GiB PC's 8-hour session needed of its heap (issue 154's log,
+/// 8 PEs, a 768 MiB window): 4063 MiB live at its peak, NAK's compile of
+/// Core Animation's generic shader on top of 3.3 GiB, and room for the
+/// largest allocation a boot has asked for (267 386 880 bytes, which a 3072
+/// MiB heap with 192 MiB extents failed).
+const LONG_SESSION_PEAK: u64 = 4063 * MIB;
+const PEAK_WINDOW: u64 = 768 * MIB;
+const LARGEST_ASKED: u64 = 267_386_880;
+
+/// On 8 to 64 GiB hosts with 4 to 32 cores, a heap whose guest keeps more
+/// than its room (the target or the host's share) holds that session's
+/// peak and largest allocation, moved by the window's block records; a
+/// guest at its room keeps it, so 12 GiB hosts stay short of it.
+#[test]
+fn hosts_past_the_guests_room_hold_a_long_sessions_heap_peak() {
+    for installed in [8, 12, 16, 24, 32, 64] {
+        for cores in [4, 8, 12, 16, 24, 32] {
+            let free = free(installed);
+            let sizes = sizes(free, cores, cores).unwrap();
+            assert_eq!(
+                sizes.heap + sizes.code.bytes + sizes.pool + sizes.guest,
+                free
+            );
+            assert!(sizes.guest >= GUEST_FLOOR, "{installed} GiB, {cores} cores");
+            let need = (LONG_SESSION_PEAK + LARGEST_ASKED + HEAP_PER_WINDOW * sizes.code.window)
+                .saturating_sub(HEAP_PER_WINDOW * PEAK_WINDOW);
+            if sizes.guest > GUEST_ROOM {
+                assert!(
+                    sizes.heap >= need,
+                    "{installed} GiB, {cores} cores: {sizes:?}"
+                );
+                // The target and the need move alike with the window: a
+                // host on the target keeps 34 MiB past it.
+                if sizes.heap == at_window(HEAP_TARGET, sizes.code.window) {
+                    assert_eq!(sizes.heap - need, 34 * MIB);
+                }
+            } else {
+                assert!(installed <= 12, "{installed} GiB, {cores} cores");
+            }
+        }
+    }
+    // The 16 GiB host on 8 PEs is on the target, at the session's window.
+    let sizes = sizes(free(16), 8, 8).unwrap();
+    assert_eq!(sizes.heap - (LONG_SESSION_PEAK + LARGEST_ASKED), 34 * MIB);
+}
+
 /// The target only takes from a guest above its room, never below it, and
 /// never gives a host less heap than its share or floor.
 #[test]

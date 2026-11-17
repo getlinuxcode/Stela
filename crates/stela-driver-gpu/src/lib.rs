@@ -11,17 +11,15 @@ use crate::bus::pci::{Address, ConfigSpace, Function};
 #[cfg(feature = "metal")]
 pub mod metal;
 
-#[cfg(feature = "nouveau-port")]
-pub mod nouveau;
-
-// AMD fork (J6): amdgpu's Linux image.
 #[cfg(feature = "amdgpu-port")]
 pub mod amdgpu;
+#[cfg(feature = "xe-port")]
+pub mod xe;
 
-pub mod amdgpu_chip;
 pub mod cold;
 pub mod gsp_perf;
 pub mod nouveau_chip;
+pub mod stack;
 
 #[cfg(feature = "linux-kernel")]
 pub mod drm;
@@ -64,6 +62,16 @@ pub enum Vendor {
 }
 
 impl Vendor {
+    /// The PCI vendor ID.
+    pub fn pci_id(self) -> u16 {
+        match self {
+            Self::Nvidia => NVIDIA_VENDOR,
+            Self::Amd => AMD_VENDOR,
+            Self::Intel => INTEL_VENDOR,
+            Self::Other(id) => id,
+        }
+    }
+
     pub fn from_pci(id: u16) -> Self {
         match id {
             NVIDIA_VENDOR => Self::Nvidia,
@@ -96,24 +104,15 @@ impl Adapter {
         })
     }
 
-    /// The AMD chip a discrete Radeon's PCI device ID names, before any
-    /// driver has read its IP discovery table.
-    pub fn amd_chip(&self) -> Option<&'static amdgpu_chip::Chip> {
-        match self.vendor {
-            Vendor::Amd => amdgpu_chip::Chip::from_pci_device(self.device),
-            _ => None,
-        }
-    }
-
     /// Every discovered adapter remains unbound until a real port exists.
     pub fn unavailable_reason(&self) -> &'static str {
         match self.vendor {
             Vendor::Nvidia => "NVIDIA requires nouveau/GSP binding and an NVK-enabled image",
-            Vendor::Amd if self.amd_chip().is_some() => {
-                "this RDNA 4 Radeon is recognized, but amdgpu and RADV are not ported to Stela yet"
-            }
             Vendor::Amd => "AMDGPU is not ported to Stela",
-            Vendor::Intel => "Intel i915/xe are not ported to Stela",
+            Vendor::Intel => {
+                "it needs Linux's i915 driver, which Stela does not have: its xe driver runs \
+                 Tiger Lake and later"
+            }
             Vendor::Other(_) => "no Stela GPU backend for this PCI vendor",
         }
     }
@@ -184,28 +183,5 @@ mod tests {
             }
             assert!(Adapter::discover(&function(vendor, [4, 3, 0])).is_none());
         }
-    }
-
-    #[test]
-    fn rdna4_radeons_are_named_but_stay_unbound() {
-        let adapter = |vendor, device| Adapter {
-            address: Address {
-                segment: 0,
-                bus: 3,
-                device: 0,
-                function: 0,
-            },
-            vendor,
-            device,
-            class: [DISPLAY_CLASS, 0, 0],
-        };
-        let navi48 = adapter(Vendor::Amd, 0x7550);
-        assert_eq!(navi48.amd_chip().map(|chip| chip.name), Some("GFX1201"));
-        assert!(navi48.unavailable_reason().contains("RDNA 4"));
-        let navi31 = adapter(Vendor::Amd, 0x744c);
-        assert_eq!(navi31.amd_chip(), None);
-        assert_eq!(navi31.unavailable_reason(), "AMDGPU is not ported to Stela");
-        // An NVIDIA board that shares the number is not a Radeon.
-        assert_eq!(adapter(Vendor::Nvidia, 0x7550).amd_chip(), None);
     }
 }

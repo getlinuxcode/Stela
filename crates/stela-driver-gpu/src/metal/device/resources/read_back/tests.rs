@@ -11,7 +11,7 @@ use crate::metal::{
     },
     pixel_format::PixelFormat,
     resource::TextureDescriptor,
-    vulkan::{backend::Object, command::Command},
+    vulkan::{ImageAspects, backend::Object, command::Command},
 };
 use alloc::vec::Vec;
 
@@ -165,4 +165,165 @@ fn a_texture_with_a_cpu_copy_needs_no_read_back() {
             .is_none()
     );
     assert_eq!(device.backend.submissions.len(), submitted);
+}
+
+/// The commands of every submission so far, in order.
+fn submitted(device: &TestDevice) -> Vec<Command> {
+    device
+        .backend
+        .submissions
+        .iter()
+        .flatten()
+        .flat_map(|segment| segment.commands.iter().cloned())
+        .collect()
+}
+
+#[test]
+fn a_shared_depth_texture_reads_back_what_the_gpu_wrote_after_the_cpu() {
+    let mut device = device_on(MockBackend::new());
+    let texture = texture(
+        &mut device,
+        StorageMode::Shared,
+        PixelFormat::Depth32Float,
+        2,
+    );
+    let tight = Strides {
+        bytes_per_row: 8,
+        bytes_per_image: 0,
+    };
+    let written: Vec<u8> = [0.25f32, 0.5, 0.75, 1.0]
+        .iter()
+        .flat_map(|depth| depth.to_le_bytes())
+        .collect();
+    device
+        .replace_region(texture, &whole(2), &written, tight)
+        .unwrap();
+    // A read outside a read-back would see the CPU's writes alone.
+    let mut read = [0; 16];
+    assert!(matches!(
+        device.get_bytes(texture, &whole(2), &mut read, tight),
+        Err(crate::metal::error::Error::Unsupported(_))
+    ));
+    let image = device.texture_image(texture).unwrap();
+    // What a render pass stored into the image since.
+    let rendered: Vec<u8> = [0.125f32, 0.5, 0.625, 0.0]
+        .iter()
+        .flat_map(|depth| depth.to_le_bytes())
+        .collect();
+    device.backend.image_bytes.insert(image.0, rendered.clone());
+    let read_back = device
+        .begin_read_back(5, texture, &whole(2), tight, 16)
+        .unwrap()
+        .expect("a shared depth texture is read by a GPU copy");
+    // The CPU's write reaches the image first, then the image is copied
+    // out of its depth aspect.
+    let commands = submitted(&device);
+    let upload = commands.iter().position(|command| {
+        matches!(command, Command::CopyBufferToImage { dst, region, .. }
+            if *dst == image && region.subresource.aspects == ImageAspects::DEPTH)
+    });
+    let copy = commands.iter().position(|command| {
+        matches!(command, Command::CopyImageToBuffer { src, region, .. }
+            if *src == image && region.subresource.aspects == ImageAspects::DEPTH)
+    });
+    assert!(
+        matches!((upload, copy), (Some(upload), Some(copy)) if upload < copy),
+        "{commands:?}"
+    );
+    device.backend.finish();
+    assert!(device.read_back_complete(&read_back).unwrap());
+    let mut runs = Vec::new();
+    read_back
+        .write_out::<()>(|offset, run| {
+            runs.push((offset, run.to_vec()));
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(runs, [(0, rendered)]);
+    device.end_read_back(read_back);
+}
+
+#[test]
+fn cpu_copies_of_depth_and_stencil_textures_keep_to_one_aspect() {
+    let mut device = device_on(MockBackend::new());
+    // Depth16Unorm texels two bytes wide: a write starting at an odd texel
+    // is not a copy Vulkan takes for depth.
+    let narrow = texture(
+        &mut device,
+        StorageMode::Shared,
+        PixelFormat::Depth16Unorm,
+        4,
+    );
+    let one = Region {
+        slice: 0,
+        level: 0,
+        origin: [1, 0, 0],
+        size: [1, 1, 1],
+    };
+    let packed = Strides {
+        bytes_per_row: 2,
+        bytes_per_image: 0,
+    };
+    assert!(matches!(
+        device.replace_region(narrow, &one, &[1, 2], packed),
+        Err(crate::metal::error::Error::Unsupported(_))
+    ));
+    let even = Region {
+        origin: [2, 1, 0],
+        ..one
+    };
+    device
+        .replace_region(narrow, &even, &[1, 2], packed)
+        .unwrap();
+    // Stencil8: one byte a texel, its stencil aspect.
+    let stencil = texture(&mut device, StorageMode::Shared, PixelFormat::Stencil8, 4);
+    device
+        .replace_region(
+            stencil,
+            &whole(4),
+            &[7; 8],
+            Strides {
+                bytes_per_row: 4,
+                bytes_per_image: 0,
+            },
+        )
+        .unwrap();
+    let read_back = device
+        .begin_read_back(
+            5,
+            stencil,
+            &whole(4),
+            Strides {
+                bytes_per_row: 4,
+                bytes_per_image: 0,
+            },
+            8,
+        )
+        .unwrap()
+        .unwrap();
+    let image = device.texture_image(stencil).unwrap();
+    assert!(submitted(&device).iter().any(|command| {
+        matches!(command, Command::CopyImageToBuffer { src, region, .. }
+            if *src == image && region.subresource.aspects == ImageAspects::STENCIL)
+    }));
+    device.backend.finish();
+    device.end_read_back(read_back);
+    // A combined format's CPU texels have no layout: blits copy its aspects.
+    let combined = texture(
+        &mut device,
+        StorageMode::Shared,
+        PixelFormat::Depth32FloatStencil8,
+        2,
+    );
+    assert!(matches!(
+        device.cpu_bands(
+            combined,
+            &whole(2),
+            Strides {
+                bytes_per_row: 16,
+                bytes_per_image: 0,
+            }
+        ),
+        Err(crate::metal::error::Error::Unsupported(_))
+    ));
 }

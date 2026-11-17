@@ -21,6 +21,15 @@ fn audio_unsupported<'a>(
 pub(crate) const AFTER_BOOT: &str =
     "added after boot, kept unused and not started until the next boot";
 
+/// Why a phone's USB tethering is not used ([`Device::offers_tethering`]).
+/// Linux's `ipheth` drives the interface only with userspace that pairs
+/// the phone first (its Kconfig says so): the phone gives the link no
+/// carrier until it trusts the computer, and that pairing protocol is not
+/// implemented here.
+pub(crate) const TETHERING: &str = "phone USB tethering (vendor class ff/fd/01, Linux ipheth) \
+     is not supported: the phone enables it only after pairing with the computer, which Stela \
+     does not do; use wired Ethernet or a USB Ethernet adapter";
+
 /// Binds every interface of `device` a driver here takes: one
 /// configuration, its endpoints configured together. A Bulk-Only disk is
 /// discovered after its settle time, waited for here.
@@ -56,6 +65,12 @@ pub(crate) fn bind_with_provider(
             BlockError::Unsupported("USB bind descriptor slot identity mismatch"),
         ));
         return;
+    }
+    // Said once per device, whichever configuration offers it.
+    if device.offers_tethering() {
+        found
+            .unused
+            .push((format!("{} {}", device.location, device.name()), TETHERING));
     }
     let all = interfaces(&device.configuration);
     let mut endpoints = Vec::new();

@@ -32,7 +32,7 @@ use core::{
     ops::Range,
     sync::atomic::{AtomicU8, AtomicU64, Ordering},
 };
-use stela_boot_core::aperture::{Doing, Lates, RANGE_PAGES};
+use stela_boot_core::aperture::{Doing, Lates, NmiGate, RANGE_PAGES};
 
 /// How long a retirement waits before it reports the processors it waits
 /// for.
@@ -252,15 +252,63 @@ pub(crate) fn before_stop_screen() {
     }
 }
 
-/// In this processor's NMI gate: whether a retirement sent the NMI
-/// ([`aperture::Processors::poke`]). The gate answers it ([`answer_nmi`])
-/// unless it is also the step watchdog's.
+/// NMIs the gates claimed as a retirement's whose mark an earlier gate had
+/// taken, and as a counter's whose counter was already reloaded, since
+/// [`take_waits`] ([`aperture::Processors::nmi_gate`]).
+///
+/// [`aperture::Processors::nmi_gate`]: stela_boot_core::aperture::Processors::nmi_gate
+static OWED_NMIS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// In this processor's NMI gate, after its counter sample took `fired`
+/// overflowed counters: whether it returns. Every NMI is claimed by what
+/// owes it: a fired counter, a retirement's NMI sent and not yet arrived
+/// ([`aperture::Processors::poke`]), which the gate answers ([`answer_nmi`]),
+/// or a counter NMI an earlier reload left owed; the step watchdog's
+/// (`watchdog`) and an NMI nothing owes stop
+/// ([`aperture::Processors::nmi_gate`]). Takes no lock and allocates
+/// nothing.
 ///
 /// [`aperture::Processors::poke`]: stela_boot_core::aperture::Processors::poke
-pub(crate) fn take_poke() -> bool {
-    crate::engine::host::shootdown()
-        .0
-        .is_some_and(|slot| PROCESSORS.take_poke(slot))
+/// [`aperture::Processors::nmi_gate`]: stela_boot_core::aperture::Processors::nmi_gate
+pub(crate) fn gate(fired: u64, rip: u64, watchdog: fn() -> bool) -> bool {
+    let Some(slot) = crate::engine::host::shootdown().0 else {
+        return fired != 0 && !watchdog();
+    };
+    let (gate, answer) = PROCESSORS.nmi_gate(slot, fired, watchdog);
+    if answer {
+        answer_nmi(rip);
+    }
+    match gate {
+        NmiGate::Sample | NmiGate::Poke => true,
+        NmiGate::OwedPoke => {
+            OWED_NMIS[0].fetch_add(1, Ordering::Relaxed);
+            true
+        }
+        NmiGate::HeldSample => {
+            OWED_NMIS[1].fetch_add(1, Ordering::Relaxed);
+            true
+        }
+        NmiGate::Stop => false,
+    }
+}
+
+/// This processor reloaded `counters` overflowed counters outside its NMI
+/// gate, whose NMIs may still come ([`aperture::Processors::owe_samples`]).
+///
+/// [`aperture::Processors::owe_samples`]: stela_boot_core::aperture::Processors::owe_samples
+pub(crate) fn owe_samples(counters: u64) {
+    if let Some(slot) = crate::engine::host::shootdown().0 {
+        PROCESSORS.owe_samples(slot, counters);
+    }
+}
+
+/// For a stop on an NMI: `nmi=owed:a/held:b/marked:m`, what this
+/// processor's gate found owed ([`aperture::Processors::nmi_owed`]).
+///
+/// [`aperture::Processors::nmi_owed`]: stela_boot_core::aperture::Processors::nmi_owed
+pub(crate) fn nmi_owed() -> Option<(u64, u64, bool)> {
+    let slot = crate::engine::host::shootdown().0?;
+    Some(PROCESSORS.nmi_owed(slot))
 }
 
 /// Answer a retirement's NMI, which found this processor at `rip`: flush
@@ -524,15 +572,20 @@ impl Drop for Counted {
 }
 
 /// The shootdowns since the last call, the ticks they waited, how many of
-/// them retired a range peers flushed page by page, and the NMIs they sent
-/// late processors, for the GPU gate's report.
+/// them retired a range peers flushed page by page, the NMIs they sent
+/// late processors, and the NMIs gates claimed as owed: a retirement's
+/// whose mark another gate took, and a counter's already reloaded
+/// ([`gate`]), for the GPU gate's report.
 #[cfg(feature = "nvk")]
-pub(crate) fn take_waits() -> (u64, u64, u64, u64) {
+pub(crate) fn take_waits() -> (u64, u64, u64, u64, [u64; 2]) {
     (
         WAITS[0].swap(0, Ordering::Relaxed),
         WAITS[1].swap(0, Ordering::Relaxed),
         RANGED.swap(0, Ordering::Relaxed),
         NMIS.swap(0, Ordering::Relaxed),
+        OWED_NMIS
+            .each_ref()
+            .map(|count| count.swap(0, Ordering::Relaxed)),
     )
 }
 

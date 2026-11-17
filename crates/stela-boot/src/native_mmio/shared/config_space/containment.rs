@@ -802,6 +802,13 @@ impl PciSlots {
     pub(in crate::native_mmio::shared) const fn new() -> Self {
         Self(RefCell::new(Cohort::Unclaimed))
     }
+
+    /// Whether no census has begun: nothing is observed or parked.
+    pub(in crate::native_mmio::shared) fn unclaimed(&self) -> bool {
+        self.0
+            .try_borrow()
+            .is_ok_and(|cohort| matches!(*cohort, Cohort::Unclaimed))
+    }
 }
 
 #[derive(Clone, Copy)]

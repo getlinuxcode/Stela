@@ -158,13 +158,11 @@ fn downstream_reset_reobserves_root_and_hub_power_before_endpoint_retirement() {
 }
 
 /// A stick behind a hub that hangs after its configuration: its first
-/// command never completes and its class reset stalls. The storage owner
-/// must leave the port reset to the storage service, which has the
-/// allocator a device behind a hub needs for its new rings; begun without
-/// one, the reset disabled the slot and reset the port before it failed,
-/// and the service's own reset then found the device gone for good.
+/// command never completes. Its owner resets the hub port at once, reusing
+/// the old binding's storage as on a root port, and the stick is found on
+/// the same port.
 #[test]
-fn a_hung_stick_behind_a_hub_is_reset_by_the_storage_service_and_found() {
+fn a_hung_stick_behind_a_hub_is_reset_in_place_and_found() {
     use crate::block::BlockDevice;
     let _clock = crate::test_clock::virtualize();
     for speed in [HIGH_SPEED, SUPER_SPEED] {
@@ -187,8 +185,8 @@ fn a_hung_stick_behind_a_hub_is_reset_by_the_storage_service_and_found() {
         let resets = hardware.borrow().nodes[&0].ports.as_ref().unwrap()[0].reset_count;
         let mut found = Found::default();
         bind::bind(&shared, stick.clone(), &mut dma, &mut found);
-        // The first INQUIRY timed out; the stick came back after one port
-        // reset by the service and was found on the same port.
+        // The first INQUIRY timed out; the stick came back after one hub
+        // port reset and was found on the same port.
         assert!(!hardware.borrow().nodes[&1].bot_wedged());
         assert_eq!(
             hardware.borrow().nodes[&0].ports.as_ref().unwrap()[0].reset_count,
@@ -376,9 +374,8 @@ fn a_timed_out_first_command_resets_a_root_stick_port_before_any_class_reset() {
     }
 }
 
-/// The same during the first scan of a stick behind a hub: the storage
-/// service that runs the scan resets its port with the allocator its new
-/// rings need, and no class reset runs first.
+/// The same during the first scan of a stick behind a hub: its owner resets
+/// the hub port in place, and no class reset runs first.
 #[test]
 fn a_timed_out_first_command_resets_a_hub_stick_port_before_any_class_reset() {
     let _clock = crate::test_clock::virtualize();
@@ -415,5 +412,250 @@ fn a_timed_out_first_command_resets_a_hub_stick_port_before_any_class_reset() {
                 .iter()
                 .any(|(_, _, request)| *request == setup(0x21, 0xff, 0, 0, 0))
         );
+    }
+}
+
+/// A published stick behind one hub or two, in high-speed and SuperSpeed
+/// topologies: the fixture's nodes, the route of the hub whose first port
+/// holds the stick, and the stick's route.
+fn sticks_behind_hubs() -> Vec<(BTreeMap<u32, Node>, u32, u32)> {
+    let mut topologies = Vec::new();
+    for speed in [HIGH_SPEED, SUPER_SPEED] {
+        topologies.push((
+            BTreeMap::from([(0, Node::hub(speed, 1)), (1, Node::bot_disk(speed))]),
+            0,
+            1,
+        ));
+        topologies.push((
+            BTreeMap::from([
+                (0, Node::hub(speed, 1)),
+                (1, Node::hub(speed, 1)),
+                (0x11, Node::bot_disk(speed)),
+            ]),
+            1,
+            0x11,
+        ));
+    }
+    topologies
+}
+
+/// Enumerate `nodes` and bind its stick: the controller's hardware model
+/// and the stick's one published disk.
+fn published_stick(
+    dma: &mut TestRegion,
+    nodes: BTreeMap<u32, Node>,
+) -> (
+    Rc<RefCell<hub::model::Hardware>>,
+    crate::usb::storage::UsbDisk,
+) {
+    let (mut controller, hardware) = hub::tests::controller(dma, 64, nodes);
+    let mut failures = Vec::new();
+    let devices = controller.enumerate(dma, &mut failures);
+    assert!(failures.is_empty(), "{failures:?}");
+    let stick = devices
+        .iter()
+        .find(|d| d.descriptor[4] != HUB_CLASS)
+        .unwrap()
+        .clone();
+    let shared = Rc::new(RefCell::new(controller));
+    let mut found = Found::default();
+    bind::bind(&shared, stick, dma, &mut found);
+    assert!(found.failures.is_empty(), "{:?}", found.failures);
+    assert_eq!(found.disks.len(), 1);
+    (hardware, found.disks.pop().unwrap())
+}
+
+fn hub_port(hardware: &Rc<RefCell<hub::model::Hardware>>, hub: u32) -> hub::model::PortModel {
+    hardware.borrow().nodes[&hub].ports.as_ref().unwrap()[0].clone()
+}
+
+/// A stick behind hubs whose link broke after it was published (every
+/// bulk transfer and the class reset end with a USB transaction error, as a
+/// stick's link may after thousands of seconds of reads): as Linux's
+/// usb-storage, the failed class reset is followed by a reset of the stick's
+/// port on its parent hub, and the read runs again and completes, where the
+/// owner declined the reset for a device behind a hub and failed the read.
+#[test]
+fn a_stick_behind_hubs_whose_link_broke_is_reset_on_its_hub_port_and_the_read_runs_again() {
+    use crate::block::BlockDevice;
+    let _clock = crate::test_clock::virtualize();
+    for (nodes, hub, route) in sticks_behind_hubs() {
+        let mut dma = TestRegion::new(1024 * 1024 * 8);
+        let (hardware, mut disk) = published_stick(&mut dma, nodes);
+        let payload = [0x6e; 512];
+        disk.write(4, &payload).unwrap();
+        crate::usb::storage::take_recoveries();
+        let resets = hub_port(&hardware, hub).reset_count;
+        hardware
+            .borrow_mut()
+            .nodes
+            .get_mut(&route)
+            .unwrap()
+            .break_bot_link();
+        let mut read = [0; 512];
+        assert_eq!(disk.read(4, &mut read), Ok(()), "route {route:#x}");
+        assert_eq!(read, payload);
+        assert!(!hardware.borrow().nodes[&route].bot_link_broken());
+        assert_eq!(hub_port(&hardware, hub).reset_count, resets + 1);
+        let records = crate::usb::storage::take_recoveries().0;
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(
+            (records[0].first, records[0].step, records[0].end),
+            (
+                crate::usb::storage::Cause::Device(transfer::USB_TRANSACTION_ERROR),
+                crate::usb::storage::Step::PortReset,
+                crate::usb::storage::End::Completed
+            )
+        );
+        // The disk goes on: later commands run without another reset.
+        disk.write(5, &payload).unwrap();
+        disk.read(5, &mut read).unwrap();
+        assert_eq!(read, payload);
+        assert_eq!(hub_port(&hardware, hub).reset_count, resets + 1);
+    }
+}
+
+/// The same broken stick whose hub port reset fails (`fault`): the read
+/// ends with one recovery record that names the reset's cause, and later
+/// commands fail at once with no further reset or record.
+fn a_failed_hub_port_reset_is_reported_once(fault: hub::model::Fault, cause: &str) {
+    use crate::block::BlockDevice;
+    let _clock = crate::test_clock::virtualize();
+    for (nodes, hub, route) in sticks_behind_hubs() {
+        let mut dma = TestRegion::new(1024 * 1024 * 8);
+        let (hardware, mut disk) = published_stick(&mut dma, nodes);
+        crate::usb::storage::take_recoveries();
+        let resets = hub_port(&hardware, hub).reset_count;
+        {
+            let mut hardware = hardware.borrow_mut();
+            hardware.nodes.get_mut(&route).unwrap().break_bot_link();
+            hardware
+                .nodes
+                .get_mut(&hub)
+                .unwrap()
+                .ports
+                .as_mut()
+                .unwrap()[0]
+                .fault = fault;
+        }
+        let mut read = [0; 512];
+        assert!(disk.read(4, &mut read).is_err(), "route {route:#x}");
+        assert!(hub_port(&hardware, hub).reset_count > resets);
+        let records = crate::usb::storage::take_recoveries().0;
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].end, crate::usb::storage::End::ResetFailed);
+        let line = alloc::format!("{}", records[0]);
+        assert!(
+            line.ends_with(&alloc::format!(
+                "the port reset failed with {cause}: the disk fails until it is bound again"
+            )),
+            "{line}"
+        );
+        let attempts = hub_port(&hardware, hub).reset_count;
+        assert!(disk.read(4, &mut read).is_err());
+        assert_eq!(hub_port(&hardware, hub).reset_count, attempts);
+        assert!(crate::usb::storage::take_recoveries().0.is_empty());
+    }
+}
+
+#[test]
+fn a_hub_port_reset_that_never_completes_is_reported_once() {
+    a_failed_hub_port_reset_is_reported_once(hub::model::Fault::ResetForever, "a time-out");
+}
+
+/// A stick that left its hub port: the port reset finds no device, as
+/// Linux's `usb_reset_device` answers `-ENODEV`.
+#[test]
+fn a_stick_gone_from_its_hub_port_is_reported_once() {
+    a_failed_hub_port_reset_is_reported_once(
+        hub::model::Fault::Disconnect,
+        "the device gone from its port",
+    );
+}
+
+/// A leaf behind one hub or two is reset on its parent's port and addressed
+/// and configured again with its own retired storage alone: no allocator is
+/// given, the old identity is refused, and the sibling keeps its slot.
+#[test]
+fn a_reusable_reset_behind_hubs_needs_no_allocation_and_keeps_the_sibling() {
+    for speed in [HIGH_SPEED, SUPER_SPEED] {
+        for (nodes, hub, route) in [
+            (
+                BTreeMap::from([
+                    (0, Node::hub(speed, 2)),
+                    (1, Node::leaf(speed)),
+                    (2, Node::leaf(speed)),
+                ]),
+                0,
+                1,
+            ),
+            (
+                BTreeMap::from([
+                    (0, Node::hub(speed, 2)),
+                    (1, Node::hub(speed, 1)),
+                    (0x11, Node::leaf(speed)),
+                    (2, Node::leaf(speed)),
+                ]),
+                1,
+                0x11,
+            ),
+        ] {
+            let mut dma = TestRegion::new(512 * 1024 * 8);
+            let (mut controller, hardware) = hub::tests::controller(&mut dma, 64, nodes);
+            let mut failures = Vec::new();
+            let devices = controller.enumerate(&mut dma, &mut failures);
+            assert!(failures.is_empty(), "{failures:?}");
+            let at = |route: u32| {
+                devices
+                    .iter()
+                    .find(|d| {
+                        controller.slots[usize::from(d.slot)]
+                            .as_ref()
+                            .unwrap()
+                            .attachment
+                            .route
+                            == route
+                    })
+                    .unwrap()
+                    .clone()
+            };
+            let (old, sibling) = (at(route), at(2));
+            let old = &old;
+            let endpoints = interfaces(&old.configuration)[0].endpoints.clone();
+            controller
+                .set_configuration(old.slot, old.configuration_value())
+                .unwrap();
+            controller
+                .configure(old.slot, &endpoints, None, &mut dma)
+                .unwrap();
+            let sibling_output = controller.slot(sibling.slot).unwrap()._output.physical();
+            let resets = hardware.borrow().nodes[&hub].ports.as_ref().unwrap()[0].reset_count;
+            // SAFETY: the empty range hands out no memory.
+            let mut none = unsafe { crate::bus::dma::RegionAllocator::new(0..0) };
+            // SAFETY: no class owner was bound; endpoints are the full
+            // configured DCI inventory of this one downstream leaf.
+            let fresh = unsafe { controller.reset_and_reuse(old, &endpoints, &mut none) }
+                .unwrap_or_else(|error| panic!("route {route:#x}: {error:?}"));
+            assert_ne!(fresh.id, old.id);
+            assert_eq!(fresh.location, old.location);
+            assert_eq!(fresh.speed, old.speed);
+            assert_eq!(
+                hardware.borrow().nodes[&hub].ports.as_ref().unwrap()[0].reset_count,
+                resets + 1
+            );
+            controller
+                .set_configuration(fresh.slot, old.configuration_value())
+                .unwrap();
+            controller
+                .configure(fresh.slot, &endpoints, None, &mut none)
+                .unwrap();
+            assert!(controller.device(old.id).is_err());
+            assert!(controller.device(fresh.id).is_ok());
+            assert!(controller.device(sibling.id).is_ok());
+            assert_eq!(
+                controller.slot(sibling.slot).unwrap()._output.physical(),
+                sibling_output
+            );
+        }
     }
 }

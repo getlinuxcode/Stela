@@ -41,7 +41,11 @@ const HEAP_SHARE: u64 = 8;
 /// allocation, and an earlier boot a 267 386 880 byte one with 192 MiB
 /// extents. The 32 GiB PC's 4666 MiB kept extents of 1.2 GiB. Hosts between
 /// the floor and their share take the heap up to this from the guest, as
-/// far as [`GUEST_ROOM`] allows.
+/// far as [`GUEST_ROOM`] allows. A 16 GiB PC's 8-hour session on its 4352
+/// MiB (the target at a 768 MiB window) held 2.8-3.3 GiB live in 1.3-1.8
+/// million free extents, the largest 194-272 MiB, and peaked at 4063 MiB
+/// when NAK compiled Core Animation's generic shader 8 hours in: defined
+/// at that window, the target would leave such a session 33 MiB.
 const HEAP_TARGET: u64 = 4 * GIB;
 /// The guest DRAM [`HEAP_TARGET`] leaves at least: twice [`GUEST_FLOOR`].
 /// A guest under it keeps the heap's share or floor, so 8 GiB hosts boot

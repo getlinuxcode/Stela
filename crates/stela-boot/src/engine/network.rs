@@ -60,6 +60,31 @@ impl Drop for Links {
     }
 }
 
+impl Links {
+    /// Each adapter's carrier now, in order, read in the loader's root.
+    fn carriers(&mut self) -> Vec<bool> {
+        let mut carriers = Vec::new();
+        let devices = &mut self.devices;
+        in_loader_root(self.root, || {
+            carriers = devices.iter_mut().map(|device| device.carrier()).collect();
+        });
+        carriers
+    }
+
+    /// The adapters with carrier now first, each group in probe order: a
+    /// cable in the second of two adapters is tried first, not after the
+    /// first adapter's whole wait for a link.
+    fn carrier_first(&mut self) {
+        let carriers = self.carriers();
+        let mut paired: Vec<(bool, Adapter)> = carriers
+            .into_iter()
+            .zip(core::mem::take(&mut self.devices))
+            .collect();
+        paired.sort_by_key(|(carrier, _)| !carrier);
+        self.devices = paired.into_iter().map(|(_, device)| device).collect();
+    }
+}
+
 /// Run `release` in the loader's root, the only root that maps the host
 /// devices' registers and DMA pages: dropping a device can drive it (`Igc`
 /// stops its controller, a USB Bluetooth controller closes its endpoints),
@@ -106,6 +131,18 @@ impl RootLink {
         }
     }
 
+    /// The adapter, for another owner that drops it in the loader's root
+    /// ([`Links`]).
+    fn into_device(self) -> Adapter {
+        let mut link = ManuallyDrop::new(self);
+        // SAFETY: `link` is never dropped or used again: its frame counts
+        // are dropped here and its device is moved out once.
+        unsafe {
+            drop(core::ptr::read(&link.frames));
+            ManuallyDrop::take(&mut link.device)
+        }
+    }
+
     /// Send `frame` inside the host drivers.
     fn send(&mut self, frame: &[u8]) -> Result<(), LinkError> {
         self.device
@@ -128,6 +165,22 @@ impl RootLink {
         // SAFETY: as in `carrier`.
         let _root = unsafe { RestoreRoot::try_enter(self.root) }?;
         Some(self.send(frame))
+    }
+
+    /// [`Link::carrier`] for a service turn, as [`Self::transmit_now`].
+    fn carrier_now(&mut self) -> Option<bool> {
+        // SAFETY: as in `carrier`.
+        let _root = unsafe { RestoreRoot::try_enter(self.root) }?;
+        Some(self.device.carrier())
+    }
+
+    /// The adapter's own state line (`Link::diagnostic`) for a service
+    /// turn, as [`Self::transmit_now`]: `None` while another processor is
+    /// inside the host drivers.
+    fn diagnostic_now(&mut self) -> Option<Option<String>> {
+        // SAFETY: as in `carrier`.
+        let _root = unsafe { RestoreRoot::try_enter(self.root) }?;
+        Some(self.device.diagnostic())
     }
 
     /// [`Link::receive`] for a service turn, as [`Self::transmit_now`].
@@ -231,10 +284,12 @@ pub struct HostNetwork {
 }
 
 impl HostNetwork {
-    /// Try each native adapter until DHCPv4 or IPv6 SLAAC provides a usable
-    /// address. A failed adapter keeps its diagnostic while the next is tried.
+    /// Try each native adapter, those with carrier first, until DHCPv4 or
+    /// IPv6 SLAAC provides a usable address. A failed adapter keeps its
+    /// diagnostic while the next is tried, and stays in `links` with every
+    /// adapter not tried, for the guest network ([`GuestNetwork::open`]).
     pub fn open(
-        mut links: Links,
+        links: &mut Links,
         clock: Clock,
         handoff: &crate::handoff::Handoff,
         options: &stela_boot_core::options::System,
@@ -249,10 +304,12 @@ impl HostNetwork {
             }
         }
         let mut failures = Vec::new();
+        links.carrier_first();
         // Each adapter is owned by a `RootLink` or still by `links` on every
         // path out, so it is dropped in the loader's root.
-        while !links.devices.is_empty() {
-            let link = RootLink::new(links.devices.remove(0), links.root);
+        let mut next = 0;
+        while next < links.devices.len() {
+            let link = RootLink::new(links.devices.remove(next), links.root);
             let driver = link.device.driver();
             let wireless = link.device.wireless();
             let location = String::from(link.device.location());
@@ -321,9 +378,14 @@ impl HostNetwork {
                         }
                         error => format!("{location}: no address ({error})."),
                     });
-                    // Its driver stops it, in the loader's root (`RootLink`).
-                    drop(stack);
-                    output::arguments(format_args!("NETWORK adapter {location} released\n"));
+                    // It stays started, in its place, for the guest network:
+                    // its link may come up later. Unused, it is stopped with
+                    // the rest (`Links`).
+                    links.devices.insert(next, stack.into_link().into_device());
+                    next += 1;
+                    output::arguments(format_args!(
+                        "NETWORK adapter {location} kept started, free for the guest network\n"
+                    ));
                 }
             }
         }
@@ -652,7 +714,22 @@ pub struct GuestNetwork {
     /// Whether the adapter's receive signal was pointed at
     /// [`set_receive_core`]'s core, which the first link up does.
     retargeted: bool,
+    /// Reports since the host adapter's state was last logged for a guest
+    /// that sends and receives nothing ([`Self::report`]).
+    silent_reports: u32,
+    /// The host adapter's carrier when last looked at, `None` before the
+    /// first look ([`Self::carrier`]).
+    carrier: Option<bool>,
+    /// When the carrier was last looked at (`output::now`).
+    carrier_checked: u64,
 }
+
+/// Reports between two host adapter state lines while the guest receives
+/// nothing: one a minute at the ten-second report.
+const SILENT_REPORTS: u32 = 6;
+
+/// How often the host adapter's carrier is looked at for the guest's link.
+const CARRIER_MILLIS: u64 = 100;
 
 /// The APIC ID of the core the guest network's receive signal goes to once
 /// the guest's link is up ([`set_receive_core`]); none past 254.
@@ -671,17 +748,21 @@ pub(super) fn set_receive_core(apic: u64) {
 const RECEIVE_BURST: usize = 256;
 
 impl GuestNetwork {
-    /// The second adapter when the mount's own client (`wants_client`)
-    /// keeps the first, otherwise the first.
-    pub fn open(links: &mut Links, wants_client: bool) -> Result<Self> {
-        let index = usize::from(wants_client);
-        if links.devices.len() <= index {
+    /// The first adapter left in `links` with carrier now, else the first
+    /// one left. The mount's own client, when it runs, has taken its adapter
+    /// first ([`HostNetwork::open`]), so the guest never takes the only
+    /// adapter with a cable from an install.
+    pub fn open(links: &mut Links) -> Result<Self> {
+        if links.devices.is_empty() {
             return Err(refuse!(
-                "the guest network needs host network adapter {adapter} of its own; {found} found",
-                adapter = index + 1,
-                found = links.devices.len()
+                "the guest network needs a host network adapter of its own; none is left"
             ));
         }
+        let index = links
+            .carriers()
+            .iter()
+            .position(|&carrier| carrier)
+            .unwrap_or(0);
         let device = links.devices.remove(index);
         output::arguments(format_args!(
             "GUEST NETWORK adapter {} mac={}\n",
@@ -696,11 +777,37 @@ impl GuestNetwork {
             received: alloc::collections::VecDeque::new(),
             unsent: alloc::collections::VecDeque::new(),
             retargeted: false,
+            silent_reports: 0,
+            carrier: None,
+            carrier_checked: 0,
         })
     }
 
     pub fn mac(&self) -> Mac {
         self.link.mac()
+    }
+
+    /// The host adapter's carrier, looked at once per [`CARRIER_MILLIS`],
+    /// for the guest adapter's link (`AppleDevices::network_carrier`):
+    /// macOS sees a host link without carrier as an unplugged cable, and
+    /// asks for an address again when it comes up. Each change is logged,
+    /// so a log tells a host link that never came up from one whose frames
+    /// went missing. `None` between looks, or while another processor is
+    /// inside the host drivers.
+    pub fn carrier(&mut self) -> Option<bool> {
+        if self.carrier.is_some() && output::millis_since(self.carrier_checked) < CARRIER_MILLIS {
+            return None;
+        }
+        let carrier = self.link.carrier_now()?;
+        self.carrier_checked = output::now();
+        if self.carrier.replace(carrier) != Some(carrier) {
+            output::arguments(format_args!(
+                "GUEST NETWORK host adapter {} link {}\n",
+                self.link.device.location(),
+                if carrier { "up" } else { "down" }
+            ));
+        }
+        Some(carrier)
     }
 
     /// Report the guest's link state as `status` gives it.
@@ -738,13 +845,21 @@ impl GuestNetwork {
     /// The beat report's line: the frames the guest adapter moved each way
     /// and dropped (oversized, filtered and overflowed), and the NCM blocks
     /// from the guest that did not decode, so a run shows whether traffic
-    /// moves.
-    pub fn report(&self) {
+    /// moves. While the guest has sent frames and the host adapter has
+    /// given it none, not even a dropped one, the adapter's own state line
+    /// follows once a minute: a log that kept no early lines still shows
+    /// whether its link, receive ring and interrupts work.
+    pub fn report(&mut self) {
         let counters = self.counters;
         output::arguments(format_args!(
-            "GUEST NETWORK frames link={} to_host={} to_guest={} drops={} oversized={} \
-             filtered={} overflowed={} malformed={}\n",
+            "GUEST NETWORK frames link={} host_link={} to_host={} to_guest={} drops={} \
+             oversized={} filtered={} overflowed={} malformed={}\n",
             match self.up {
+                Some(true) => "up",
+                Some(false) => "down",
+                None => "unknown",
+            },
+            match self.carrier {
                 Some(true) => "up",
                 Some(false) => "down",
                 None => "unknown",
@@ -757,6 +872,21 @@ impl GuestNetwork {
             counters.overflowed,
             counters.malformed
         ));
+        // Frames the host adapter gave, delivered or dropped at the guest's
+        // filter or full queue (`oversized` counts both ways).
+        let given = counters.to_guest + counters.filtered + counters.overflowed;
+        if counters.to_host == 0 || given != 0 {
+            self.silent_reports = 0;
+            return;
+        }
+        if self.silent_reports.is_multiple_of(SILENT_REPORTS)
+            && let Some(Some(state)) = self.link.diagnostic_now()
+        {
+            output::arguments(format_args!(
+                "GUEST NETWORK host adapter gave the guest no frame: {state}\n"
+            ));
+        }
+        self.silent_reports = self.silent_reports.wrapping_add(1);
     }
 
     /// Read frames from the host adapter while the guest's receive queue
@@ -812,7 +942,9 @@ impl GuestNetwork {
     /// storage. A full host ring keeps that frame and the ones after it for
     /// the next turn, as Linux requeues a `NETDEV_TX_BUSY` frame, and so
     /// does another processor inside the host drivers, whose lock a turn
-    /// does not wait for.
+    /// does not wait for. A frame sent while the host link has no carrier
+    /// is dropped, as a NIC without a cable drops it: the guest sees the
+    /// link down ([`Self::carrier`]), and that is no refusal.
     pub fn transmit(&mut self, frames: Vec<Vec<u8>>) -> Option<Vec<u8>> {
         self.unsent.extend(frames);
         let mut reusable = None;
@@ -820,6 +952,7 @@ impl GuestNetwork {
             match self.link.transmit_now(frame) {
                 Some(Ok(())) => {}
                 None | Some(Err(LinkError::Busy)) => break,
+                Some(Err(LinkError::NoCarrier)) => {}
                 Some(Err(error)) => self.refuse(error.into()),
             }
             reusable = self.unsent.pop_front();

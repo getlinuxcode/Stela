@@ -16,7 +16,6 @@ use super::{
 use crate::{engine::host, output};
 use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use core::{
-    ffi::{c_char, c_void},
     hint,
     num::NonZeroU64,
     ptr::{self, NonNull},
@@ -29,26 +28,18 @@ use stela_drivers::gpu::metal::{
     deferred::{busy_pause_after_slice, busy_pause_millis},
     device::{lifecycle::QuiesceStatus, pass_times},
     error::Error,
-    native::{self, ExportedMemory, Loader, MemoryExporter, NativeBackend, pipeline_store, vk},
-    nvidia::Attachment,
+    native::{self, ExportedMemory, Loader, MemoryExporter, NativeBackend, pipeline_store},
+    open::{Attachment, Gpu, OpenError, PcieLink, open, reopen},
     service::{JobSlice, Served, ServiceHost, SharedService, identity::DeviceEpoch, wire::Status},
     timing::{ExitWatch, Totals},
     vulkan::physical::PciBusInfo,
 };
+use stela_drivers::gpu::stack::ResetState;
 use stela_linux::{
     client::Run,
     function::{dma_quarantine_status, quarantined_functions},
 };
 use stela_loader::{apple_device_tree::DeviceTree, stela_gpu};
-
-#[cfg(not(feature = "radv"))]
-use stela_drivers::gpu::metal::native::Refusals;
-// AMD fork (J7): a Radeon's Metal device opens through `metal::amd`, over
-// RADV, which the `radv` feature links in place of NVK.
-#[cfg(feature = "radv")]
-use stela_drivers::gpu::metal::amd::open::{Gpu, OpenError, open, reopen};
-#[cfg(not(feature = "radv"))]
-use stela_drivers::gpu::metal::nvidia::open::{Gpu, OpenError, open, reopen};
 
 type Shared = SharedService<NativeBackend, AirCompiler>;
 
@@ -63,26 +54,9 @@ const STOP_UNLOAD_SECONDS: u64 = 10;
 
 /// The services for the kernel's interrupts, once all are open.
 static SERVICES: AtomicPtr<Vec<Arc<Shared>>> = AtomicPtr::new(ptr::null_mut());
-
-// AMD fork (J7): RADV's NIR options (`amd/radv_host/nir_options.c`).
-#[cfg(feature = "radv")]
-unsafe extern "C" {
-    fn stela_radv_nir_options(physical: vk::PhysicalDevice) -> *const c_void;
-}
-
-#[cfg(not(feature = "radv"))]
-unsafe extern "C" {
-    fn stela_nvk_nir_options(physical: vk::PhysicalDevice) -> *const c_void;
-    /// `compat/mesa/submit_thread.c`.
-    fn stela_nvk_submit_thread(queue: vk::Queue) -> vk::Result;
-    fn stela_nvk_submit_failure(
-        queue: vk::Queue,
-        semaphore: vk::Semaphore,
-        value: u64,
-    ) -> vk::Result;
-    fn stela_nvk_forget_failures(queue: vk::Queue) -> u32;
-    fn stela_nvk_count_failures(queue: vk::Queue, outstanding: *mut u32);
-}
+/// The bound GPU, by its index (its DRM minor), of each service, in the
+/// services' order.
+static SERVED: AtomicPtr<Vec<usize>> = AtomicPtr::new(ptr::null_mut());
 
 /// The compile stacks ([`open_gpu`]), whose jobs [`run`] runs with the
 /// shootdown vector open; a GPU past these runs its jobs masked.
@@ -351,6 +325,16 @@ static MEASURED_BETWEEN: AtomicBool = AtomicBool::new(false);
 /// The carved bytes the measured job started from.
 static MEASURED_FROM: AtomicU64 = AtomicU64::new(0);
 
+/// How far the heap's carved bytes rose above where the measured job began,
+/// while one is measured: the heap a compile in that job cost, which the
+/// pipeline store keeps with what it compiled. Zero outside a measured job.
+pub(in crate::engine) fn job_heap_rise() -> u64 {
+    if !MEASURING.load(Ordering::Acquire) {
+        return 0;
+    }
+    (crate::ALLOCATOR.marked_peak() as u64).saturating_sub(MEASURED_FROM.load(Ordering::Relaxed))
+}
+
 /// Runs `run`, and for a job it began, keeps how far the heap's carved
 /// bytes rose above where they were until the job ended: a compile's own
 /// peak, as jobs run one at a time, with what other processors carved
@@ -509,6 +493,15 @@ fn report_peaks() {
         }
         output::arguments(format_args!("{line}\n"));
     }
+}
+
+/// A guest call waits for a job no processor started: a PE whose guest
+/// sleeps waiting for an interrupt is called to start it now. A sleeping PE
+/// wakes only for its guest or the host's service, so a queued job waited
+/// for the next PE that stopped to wait, or 20 ms for a busy one
+/// (`Taker::Busy`), while the guest's call slept and asked again.
+fn job_waiting() {
+    super::call_idle_core();
 }
 
 /// What the kext found of the Metal plugin, the bundle whose code this boot's
@@ -916,7 +909,8 @@ pub(in crate::engine) fn report_calls(tsc_hz: u64) {
         if jobs.ran != 0 || jobs.deferred != 0 {
             output::arguments(format_args!(
                 "GPU JOBS ran={} total_us={} longest_us={} slices={} longest_slice_us={} \
-                 longest_queued_us={} deferred={} repeated={} waiting={} heap_rise={}M from={}M\n",
+                 longest_queued_us={} deferred={} repeated={} waiting={} heap_rise={}M from={}M \
+                 queued_mean_us={} resumed={} resumed_mean_us={} resumed_longest_us={}\n",
                 jobs.ran,
                 micros(jobs.ticks),
                 micros(jobs.longest),
@@ -928,6 +922,10 @@ pub(in crate::engine) fn report_calls(tsc_hz: u64) {
                 service.jobs_waiting(),
                 JOB_RISE.swap(0, Ordering::Relaxed) >> 20,
                 JOB_RISE_FROM.load(Ordering::Relaxed) >> 20,
+                micros(jobs.queued / jobs.ran.max(1)),
+                jobs.resumed,
+                micros(jobs.resumed_after / jobs.resumed.max(1)),
+                micros(jobs.longest_resumed_after),
             ));
         }
     }
@@ -982,10 +980,11 @@ pub(in crate::engine) fn report_calls(tsc_hz: u64) {
         ));
     }
     // The host's Linux work the calls asked the boot CPU for, by ioctl.
-    let (shootdowns, shot, ranged, nmis) = crate::native_mmio::shootdown::take_waits();
+    let (shootdowns, shot, ranged, nmis, [owed, held]) =
+        crate::native_mmio::shootdown::take_waits();
     output::arguments(format_args!(
         "\nGPU POSTED shootdowns={shootdowns}/{}us ranged={ranged} nmis={nmis} \
-         request:count/waited_us",
+         owed_nmis={owed}/{held} request:count/waited_us",
         micros(shot)
     ));
     for &(request, count, waited) in posted.iter().take(SHOWN) {
@@ -1070,21 +1069,6 @@ fn report_lock(tsc_hz: u64) {
     output::arguments(format_args!("{line}\n"));
 }
 
-/// NVK's entry point, as Vulkan types it.
-unsafe extern "system" fn entry(
-    instance: vk::Instance,
-    name: *const c_char,
-) -> vk::PFN_vkVoidFunction {
-    use vk::Handle;
-    // SAFETY: the loader's call, and both ends are one function pointer.
-    unsafe {
-        core::mem::transmute(stela_mesa::vk_icdGetInstanceProcAddr(
-            instance.as_raw() as *mut c_void,
-            name,
-        ))
-    }
-}
-
 /// The host pages behind whole pages of guest RAM.
 fn guest_pages(ranges: &[MemoryRange]) -> Result<Vec<Run>, Error> {
     const NOT_RAM: Error = Error::Invalid("imported memory is whole pages of guest RAM");
@@ -1106,7 +1090,7 @@ fn guest_pages(ranges: &[MemoryRange]) -> Result<Vec<Run>, Error> {
     Ok(runs)
 }
 
-/// Guest RAM the kext wired, for NVK to import. The GPU reaches it through
+/// Guest RAM the kext wired, for the Vulkan driver to import. The GPU reaches it through
 /// the host pages behind it.
 struct Exporter;
 
@@ -1129,45 +1113,21 @@ impl MemoryExporter for Exporter {
 }
 
 fn service(gpu: &Gpu, stack: u64) -> Result<Arc<Shared>, OpenError> {
-    #[cfg(not(feature = "radv"))]
+    let driver = gpu.stack.vulkan.as_ref().ok_or(Error::Invalid(
+        "the GPU's stack drives displays only: it has no Vulkan driver",
+    ))?;
     let compiler = |physical| {
-        // SAFETY: NVK's own physical device, whose options last as long.
-        let options = unsafe { stela_nvk_nir_options(physical) };
-        compiler::Service::linked(NonNull::new(options.cast_mut()).expect("NVK has NIR options"))
+        compiler::Service::linked(core::array::from_fn(|stage| {
+            // SAFETY: the driver's own physical device, whose options last
+            // as long.
+            let options = unsafe { (driver.nir_options)(physical, stage as u32) };
+            NonNull::new(options.cast_mut()).expect("the Vulkan driver has NIR options per stage")
+        }))
     };
-    // AMD fork (J7): RADV's options for its device.
-    #[cfg(feature = "radv")]
-    let compiler = |physical| {
-        // SAFETY: RADV's own physical device, whose options last as long.
-        let options = unsafe { stela_radv_nir_options(physical) };
-        compiler::Service::linked(NonNull::new(options.cast_mut()).expect("RADV has NIR options"))
-    };
-    #[cfg(not(feature = "radv"))]
-    let loader = Loader {
-        get_instance_proc_addr: entry,
-        log: driver_message,
-        // A commit's submission runs where Linux does, not on its PE.
-        submit_thread: Some(stela_nvk_submit_thread),
-        // A refused submission fails its command buffer, not the device.
-        refusals: Some(Refusals {
-            take: stela_nvk_submit_failure,
-            forget: stela_nvk_forget_failures,
-            count: stela_nvk_count_failures,
-        }),
-        // An import's driver work after its turn may wait for Linux here.
-        relax,
-    };
-    // AMD fork (J7): RADV submits on the calling PE, whose DRM requests
-    // reach Linux as any client's do; a refused submission fails the device.
-    #[cfg(feature = "radv")]
-    let loader = Loader {
-        get_instance_proc_addr: entry,
-        log: driver_message,
-        submit_thread: None,
-        refusals: None,
-        relax,
-    };
-    // SAFETY: the linked NVK and compiler, which last for the boot.
+    // An import's driver work after its turn may wait for Linux in `relax`.
+    let loader: Loader = driver.loader(driver_message, relax);
+    // SAFETY: the stack's linked Vulkan driver and the compiler, which last
+    // for the boot.
     let service = unsafe {
         open(
             loader,
@@ -1184,6 +1144,14 @@ fn service(gpu: &Gpu, stack: u64) -> Result<Arc<Shared>, OpenError> {
     let service = service.with_reopen(Box::new(move || unsafe {
         reopen(loader, Box::new(Exporter), compiler, &gpu)
     }));
+    // A driver that loses its device only with a GPU its kernel driver
+    // reset, whose release would wait for that reset's end, keeps the lost
+    // device unreleased, as an open whose first submission hung leaves it.
+    let service = if driver.keep_lost {
+        service.keep_lost_devices()
+    } else {
+        service
+    };
     Ok(Arc::new(SharedService::new(
         service,
         ServiceHost {
@@ -1197,32 +1165,109 @@ fn service(gpu: &Gpu, stack: u64) -> Result<Arc<Shared>, OpenError> {
             served,
             wake: look_again,
             bundle,
+            job_waiting,
         },
     )))
 }
 
-/// Open a service over every bound GPU. What stops one is reported, and the
-/// Mac boots without Metal on that GPU.
+/// Open a service over each bound GPU that [`metal_devices`] chooses, the
+/// PC's Metal device first. What stops one is reported, and the Mac boots
+/// without Metal on that GPU. When none of them opens, the drawing GPUs it
+/// left display-only serve instead, with one line each; those that stay
+/// display-only are reported once, with the GPU that draws for Metal.
+///
+/// [`metal_devices`]: stela_drivers::gpu::stack::metal_devices
 pub(in crate::engine) fn open_service() {
     let Some(gpu) = installed() else {
         return;
     };
+    let bound = &gpu.start.bound;
+    let chosen = metal_choice(bound, super::display::taken_index());
     let mut constructed = false;
-    let services: Vec<_> = gpu
-        .start
-        .bound
-        .iter()
-        .enumerate()
-        .filter_map(|(index, bound)| open_gpu(gpu, index, bound, &mut constructed))
-        .collect();
+    let mut open = |indices: &[usize]| -> Vec<(usize, Arc<Shared>)> {
+        indices
+            .iter()
+            .filter_map(|&index| {
+                open_gpu(gpu, index, &bound[index], &mut constructed)
+                    .map(|service| (index, service))
+            })
+            .collect()
+    };
+    let mut opened = open(&chosen.serve);
+    if let Some(&(serving, _)) = opened.first() {
+        for &index in &chosen.display_only {
+            output::arguments(format_args!(
+                "GPU {}: shows displays only: GPU {}, a discrete GPU, draws for Metal\n",
+                bound[index].name, bound[serving].name
+            ));
+        }
+    } else {
+        opened = open(&chosen.display_only);
+        for &(index, _) in &opened {
+            output::arguments(format_args!(
+                "GPU {}: draws for Metal, as no discrete GPU opened a Metal device\n",
+                bound[index].name
+            ));
+        }
+    }
+    let (served, services): (Vec<_>, Vec<_>) = opened.into_iter().unzip();
+    SERVED.store(Box::into_raw(Box::new(served)), Ordering::Release);
     SERVICES.store(Box::into_raw(Box::new(services)), Ordering::Release);
 }
 
-/// AMD fork (J7): how many services [`open_service`] opened.
-#[cfg(feature = "radv")]
-pub(in crate::engine) fn opened() -> usize {
-    // SAFETY: [`open_service`] published it, and it lasts for the boot.
-    unsafe { SERVICES.load(Ordering::Acquire).as_ref() }.map_or(0, Vec::len)
+/// The bound GPU, by its index, that service `service` runs on: services
+/// follow [`metal_choice`]'s order, which puts the GPU driving the display
+/// first and leaves out failed GPUs and, while a chosen GPU opened,
+/// display-only ones, so it is not the claims' order.
+pub(super) fn served_gpu(service: usize) -> Option<usize> {
+    // SAFETY: published once, before any service exists, and leaked.
+    unsafe { SERVED.load(Ordering::Acquire).as_ref() }
+        .and_then(|served| served.get(service).copied())
+}
+
+/// Which bound GPUs serve Metal devices, given the one whose output took
+/// the connected display.
+pub(super) fn metal_choice(
+    bound: &[Bound],
+    display: Option<usize>,
+) -> stela_drivers::gpu::stack::MetalDevices {
+    let candidates: Vec<_> = bound
+        .iter()
+        .enumerate()
+        .map(|(index, bound)| stela_drivers::gpu::stack::Candidate {
+            draws: bound.stack.draws(),
+            integrated: integrated(index, bound),
+            drives_display: display == Some(index),
+        })
+        .collect();
+    stela_drivers::gpu::stack::metal_devices(&candidates)
+}
+
+/// Whether the bound GPU at `index` is integrated: its kernel driver's
+/// answer for the bound device where it gives one, else its table's. A
+/// driver that decides during its probe and does not answer leaves the
+/// kind unknown, and the GPU counts as integrated, so a discrete GPU takes
+/// the Metal device first; that is reported once per GPU.
+fn integrated(index: usize, bound: &Bound) -> bool {
+    /// The bound GPUs, by index, whose unanswered query was reported.
+    static REPORTED: AtomicU64 = AtomicU64::new(0);
+    let Some(query) = bound.stack.kernel.probed_integrated else {
+        return bound.integrated.unwrap_or(false);
+    };
+    if let Some(integrated) = client::query(index as u32, query) {
+        return integrated;
+    }
+    let integrated = bound.integrated.unwrap_or(true);
+    let bit = 1u64 << index.min(63);
+    if REPORTED.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+        output::arguments(format_args!(
+            "GPU {}: {} did not say whether it is integrated, so it counts as {}\n",
+            bound.name,
+            bound.stack.kernel.driver,
+            if integrated { "integrated" } else { "discrete" }
+        ));
+    }
+    integrated
 }
 
 /// Runs the image's C constructors once, on the stack of whoever opens first.
@@ -1233,7 +1278,7 @@ fn construct(constructed: &mut bool) {
     }
 }
 
-/// The service of `bound`, at DRM minor `index`, whose failure is reported.
+/// The service of `bound`, the bound GPU at `index`, whose failure is reported.
 fn open_gpu(
     gpu: &Installed,
     index: usize,
@@ -1244,17 +1289,18 @@ fn open_gpu(
         crate::output::arguments(format_args!("GPU {}: {reason}\n", bound.name));
         None
     };
-    let Some(link) = bound.link else {
-        return refuse("no PCIe link");
+    if !bound.stack.draws() {
+        // Its kernel driver shows frames; `display` takes its outputs.
+        return None;
+    }
+    // Read before the GPU's first work, for the guest's `StelaHost`.
+    client::remember_memory(index as u32, bound.stack);
+    let link = match PcieLink::admitted(bound.link, integrated(index, bound)) {
+        Ok(link) => link,
+        Err(reason) => return refuse(reason),
     };
-    #[cfg(not(feature = "radv"))]
-    let Some(chipset) = client::chipset(index as u32) else {
+    let Some(chip) = client::query(index as u32, bound.stack.kernel.chip) else {
         return refuse("no chipset reported");
-    };
-    // AMD fork (J7): the graphics core amdgpu's IP discovery read.
-    #[cfg(feature = "radv")]
-    let Some(gc) = client::gc_version(index as u32) else {
-        return refuse("no graphics core version reported");
     };
     let Some(stack) = Stack::map(gpu.window, STACK_BYTES) else {
         return refuse("no memory for its service");
@@ -1263,16 +1309,14 @@ fn open_gpu(
     // It serves for the boot.
     core::mem::forget(stack);
     let target = Gpu {
+        stack: bound.stack,
         pci: PciBusInfo {
             domain: bound.drm.segment.into(),
             bus: bound.drm.bus.into(),
             device: bound.drm.slot.into(),
             function: bound.drm.function.into(),
         },
-        #[cfg(not(feature = "radv"))]
-        chipset,
-        #[cfg(feature = "radv")]
-        gc,
+        chip,
         // A GPU in a Thunderbolt enclosure reaches Stela as the function
         // firmware enumerated, like any other in a slot.
         attachment: Attachment {
@@ -1281,6 +1325,18 @@ fn open_gpu(
             location_number: index as u64,
         },
     };
+    // Made before the first submission, so a reset it caused shows on it.
+    let driver_name = bound.stack.kernel.driver;
+    let watch = bound.stack.kernel.reset.as_ref().and_then(|reset| {
+        let watch = client::ResetWatch::new(index as u32, reset);
+        if watch.is_none() {
+            output::arguments(format_args!(
+                "GPU {}: no {driver_name} context to watch for resets\n",
+                bound.name
+            ));
+        }
+        watch
+    });
     let mut opened = None;
     run(top, &mut || {
         construct(constructed);
@@ -1288,6 +1344,33 @@ fn open_gpu(
     });
     match opened? {
         Ok(service) => {
+            if let Some(state @ (ResetState::Reset | ResetState::Resetting)) =
+                watch.as_ref().and_then(client::ResetWatch::state)
+            {
+                // The first submission hung the GPU and the driver's recovery
+                // took it: its fence was signaled by the reset, not the GPU.
+                // Every later file close and submission waits on that reset,
+                // which on Navi 21 has not been seen to end. The service is
+                // kept unreleased, as its release closes the driver's file.
+                output::arguments(format_args!(
+                    "GPU {}: {driver_name} reset the GPU during its first submission{}; \
+                     the Mac boots without Metal on it\n",
+                    bound.name,
+                    if state == ResetState::Resetting {
+                        ", reset still in progress"
+                    } else {
+                        ""
+                    },
+                ));
+                core::mem::forget(service);
+                // The reset unmapped the display's buffers too.
+                super::display::abandon();
+                return None;
+            }
+            output::arguments(format_args!(
+                "GPU {}: Metal service open at DRM minor {index}\n",
+                bound.name
+            ));
             // Without a second stack, every compilation stays in its turn.
             service.set_wait_bound(gpu.tsc_hz / 1000 * WAIT_BOUND_MILLIS);
             service.set_look_budget(gpu.tsc_hz / 1_000_000 * LOOK_MICROS);
@@ -1394,6 +1477,9 @@ pub(in crate::engine) fn stop(close_gates: impl FnOnce() -> u64) {
     let Some(gpu) = installed() else {
         return;
     };
+    // From here Linux runs on the boot CPU only, which owns what the stop
+    // releases.
+    super::close_moves();
     let services = shared();
     let ms = |since: u64| host::rdtsc().wrapping_sub(since) / (gpu.tsc_hz / 1000).max(1);
     let began = host::rdtsc();
@@ -1448,7 +1534,9 @@ pub(in crate::engine) fn stop_for_fatal() {
     if installed().is_none() || STOPPING.swap(true, Ordering::AcqRel) {
         return;
     }
-    if host::processor() == BOOT_CPU.load(Ordering::Relaxed) {
+    // A stop on a processor running Linux in the boot CPU's place holds
+    // the host drivers' lock the unload would wait for.
+    if host::processor() == BOOT_CPU.load(Ordering::Relaxed) || host::moved_here() {
         output::arguments(format_args!(
             "GPU firmware left running: the stop is on the CPU that unloads it\n"
         ));

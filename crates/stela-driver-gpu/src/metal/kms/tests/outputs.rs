@@ -165,6 +165,33 @@ fn an_output_that_cannot_be_set_stays_dark_and_the_others_keep_the_buffers() {
     assert_eq!((display.outputs(), display.unshown()), (1, 1));
 }
 
+/// A DisplayPort hub's monitors (MST) each list the hub's encoders, one a
+/// controller: every one of them shows the picture, at the take or when
+/// connected later.
+#[test]
+fn a_hubs_monitors_each_show_the_picture() {
+    let mut card = two_monitors();
+    card.mst = true;
+    {
+        let display = Display::take(&mut card, (6, 4)).unwrap();
+        assert_eq!((display.outputs(), display.unshown()), (2, 0));
+    }
+    assert!(card.set_40.is_some() && card.set.is_some());
+
+    let mut later = two_monitors();
+    later.mst = true;
+    later.connected = false;
+    let mut display = Display::take(&mut later, (6, 4)).unwrap();
+    assert_eq!(display.outputs(), 1);
+    display.drm.connected = true;
+    let joined = Watched {
+        joined: 1,
+        ..Watched::default()
+    };
+    assert_eq!(display.watch(), joined);
+    assert_eq!(display.outputs(), 2);
+}
+
 #[test]
 fn a_set_guest_size_shows_only_where_an_output_runs_it() {
     let mut card = Card::new(vec![at(8, 4, PREFERRED, 60)]);
@@ -222,7 +249,7 @@ fn a_monitor_connected_later_joins_the_picture_in_its_size() {
 }
 
 #[test]
-fn a_monitor_connected_later_without_the_size_is_tried_once_per_connection() {
+fn a_monitor_connected_later_without_the_size_is_tried_for_a_few_looks_per_connection() {
     let mut card = two_monitors();
     card.first = vec![at(8, 4, PREFERRED, 60)];
     card.first_connected = false;
@@ -233,6 +260,10 @@ fn a_monitor_connected_later_without_the_size_is_tried_once_per_connection() {
         unshown: 1,
         ..unchanged
     };
+    // Its EDID may read late: tried at each look, counted at the last.
+    for _ in 1..RESTORE_TRIES {
+        assert_eq!(display.watch(), unchanged);
+    }
     assert_eq!(display.watch(), unshown);
     assert_eq!(display.unshown(), 1);
     let probes = display.drm.probes;
@@ -242,9 +273,55 @@ fn a_monitor_connected_later_without_the_size_is_tried_once_per_connection() {
     assert_eq!(display.watch(), unchanged);
     assert_eq!(display.unshown(), 0);
     display.drm.first_connected = true;
+    for _ in 1..RESTORE_TRIES {
+        assert_eq!(display.watch(), unchanged);
+    }
     assert_eq!(display.watch(), unshown);
     assert_eq!(display.outputs(), 1);
     assert!(display.drm.set_40.is_none());
+}
+
+/// A second monitor read connected at the take before its EDID, as one
+/// that searches its inputs after the GPU's reset, lists no mode or only
+/// DRM's fallback modes then, and its modes once its EDID reads.
+#[test]
+fn a_monitor_whose_edid_reads_late_joins_the_picture_at_a_later_look() {
+    for early in [vec![], vec![at(2, 2, 0, 60)]] {
+        let mut card = two_monitors();
+        card.first = early;
+        let joining;
+        {
+            let mut display = Display::take(&mut card, (6, 4)).unwrap();
+            assert_eq!((display.outputs(), display.unshown()), (1, 1));
+            assert_eq!(display.watch(), Watched::default());
+            display.drm.first = vec![at(8, 4, PREFERRED, 60), at(6, 4, 0, 60)];
+            joining = display.drm.first[1];
+            let joined = Watched {
+                joined: 1,
+                ..Watched::default()
+            };
+            assert_eq!(display.watch(), joined);
+            assert_eq!((display.outputs(), display.unshown()), (2, 0));
+        }
+        assert_eq!(card.set_40.map(|(mode, _)| mode), Some(joining));
+    }
+}
+
+/// An output the take found no free controller for stays so: it is not
+/// probed at each look.
+#[test]
+fn an_output_without_a_free_controller_is_not_tried_again() {
+    let mut card = two_monitors();
+    // Both reach only controller 40, which the first takes.
+    card.first_crtcs = 0b01;
+    card.possible_crtcs = 0b01;
+    let mut display = Display::take(&mut card, (6, 4)).unwrap();
+    assert_eq!((display.outputs(), display.unshown()), (1, 1));
+    let probes = display.drm.probes;
+    for _ in 0..RESTORE_TRIES + 1 {
+        assert_eq!(display.watch(), Watched::default());
+    }
+    assert_eq!(display.drm.probes, probes);
 }
 
 #[test]
@@ -282,4 +359,61 @@ fn a_wide_panel_whose_native_size_cannot_be_told_runs_the_largest_of_its_shape()
     assert_eq!(choose(&plain, firmware, narrow), Some(modes[3]));
     assert!(same_shape((1366, 768), (1920, 1080)));
     assert!(!same_shape((2560, 1440), (5120, 1440)));
+}
+
+/// The outputs shown are named as Linux names them, the pacing one first,
+/// and a laptop's built-in panel is told apart.
+#[test]
+fn the_outputs_shown_are_named_and_a_built_in_panel_is_known() {
+    let mut card = two_monitors();
+    // An eDP panel on the first connector, HDMI on the second.
+    card.ports = [(14, 1), (11, 1)];
+    let display = Display::take(&mut card, (6, 4)).unwrap();
+    let ports: Vec<_> = display.ports().collect();
+    let names: Vec<_> = ports.iter().map(|port| alloc::format!("{port}")).collect();
+    assert_eq!(names, ["eDP-1", "HDMI-A-1"]);
+    assert_eq!(
+        ports.iter().map(|port| port.panel()).collect::<Vec<_>>(),
+        [true, false]
+    );
+}
+
+#[test]
+fn the_identity_is_the_edid_of_the_output_that_gives_the_picture() {
+    let edid = |serial: u8| {
+        let mut e = vec![0u8; 128];
+        e[..8].copy_from_slice(&[0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0]);
+        e[12] = serial;
+        e
+    };
+    for lit in [50, 51] {
+        let mut card = two_monitors();
+        card.edids = [Some(edid(1)), Some(edid(2))];
+        card.lit = lit;
+        let mut display = Display::take(&mut card, (4, 2)).unwrap();
+        assert_eq!(display.outputs(), 2);
+        // The output that gives the picture, its size and its refresh
+        // names the monitor, the other output's EDID does not.
+        let first = display.heads[0].connector;
+        assert_eq!(first, lit);
+        let own = edid((first - 49) as u8);
+        assert_eq!(display.edid(), Some(&own[..]));
+        // A look at the outputs later keeps it.
+        display.watch();
+        assert_eq!(display.edid(), Some(&own[..]));
+        // Reading it asked nothing about the scaling property.
+        assert_eq!(display.drm.property_requests(), 0);
+    }
+
+    // A connector with no EDID gives none, and the size alone names the
+    // display; one too long to be an EDID is not read.
+    let mut bare = two_monitors();
+    bare.edids = [None, Some(edid(2))];
+    let display = Display::take(&mut bare, (4, 2)).unwrap();
+    assert_eq!(display.heads[0].connector, 50);
+    assert_eq!(display.edid(), None);
+    drop(display);
+    let mut long = two_monitors();
+    long.edids = [Some(vec![0; EDID_BYTES as usize + 1]), None];
+    assert_eq!(Display::take(&mut long, (4, 2)).unwrap().edid(), None);
 }

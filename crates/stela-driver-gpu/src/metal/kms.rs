@@ -9,11 +9,17 @@
 //! Several connected outputs show the same picture, as Linux's fbdev helper
 //! clones them: one size that most of them run ([`plan`]), each output on its
 //! own controller in its own mode of that size, all scanning out the same
-//! buffers. The guest has one display, so an output with no mode of that size
-//! stays dark; no scaler exists. The output the firmware lit, which the driver
-//! reads back as the connector's current encoder, wins ties, then DRM's
-//! order. The first output paces the flips; the others follow it to the
-//! newest buffer, and one that lags a frame may show a frame being filled.
+//! buffers. The guest has one display. An output after the first with no
+//! mode of that size runs its native mode instead, and its controller's
+//! scaler fills it with the picture, keeping its shape ([`fit`]): DRM's
+//! "scaling mode" connector property set to "Full aspect", as `xrandr`
+//! sets it. Only enlarging is asked, as a laptop panel's scaler does with a
+//! smaller mode; an output whose native size is smaller than the picture in
+//! either direction, or that offers no such property, stays dark. The output
+//! the firmware lit, which the driver reads back as the connector's current
+//! encoder, wins ties, then DRM's order. The first output paces the flips;
+//! the others follow it to the newest buffer, and one that lags a frame may
+//! show a frame being filled.
 //!
 //! NVIDIA's display engine reads only video memory, so a guest surface in
 //! guest RAM cannot be scanned out in place: frames copy in, top to bottom,
@@ -37,7 +43,8 @@
 //! hot-plug interrupt keeps current, is read with no probe ([`detected`]).
 //! An output that returns after it was seen disconnected gets its mode set
 //! again ([`Display::watch`]), as Linux's fbdev helper does on a hot-plug
-//! event, and one connected after the take joins the picture if it can.
+//! event, and one connected after the take joins the picture if it can,
+//! scaled as at the take.
 use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::ops::Range;
@@ -59,11 +66,33 @@ const MAP_DUMB: u32 = request::<MapDumb>(0xb3);
 const ADD_FB2: u32 = request::<FramebufferCommand>(0xb8);
 const REMOVE_FB: u32 = request::<u32>(0xaf);
 const DESTROY_DUMB: u32 = request::<DestroyDumb>(0xb4);
+const CRTC_GET_SEQUENCE: u32 = request::<CrtcSequence>(0x3b);
+const GET_PROPERTY: u32 = request::<PropertyInfo>(0xaa);
+const OBJECT_PROPERTIES: u32 = request::<ObjectProperties>(0xb9);
+const SET_OBJECT_PROPERTY: u32 = request::<SetProperty>(0xba);
+const GET_BLOB: u32 = request::<Blob>(0xac);
 
 /// `DRM_MODE_CONNECTED`.
 const CONNECTED: u32 = 1;
 /// `DRM_MODE_TYPE_PREFERRED`.
 const PREFERRED: u32 = 1 << 3;
+/// `DRM_MODE_FLAG_INTERLACE`.
+const INTERLACED: u32 = 1 << 4;
+/// `DRM_MODE_OBJECT_CONNECTOR`.
+const OBJECT_CONNECTOR: u32 = 0xc0c0_c0c0;
+/// DRM's standard connector property `drm_mode_create_scaling_mode_property`
+/// makes, and its values `DRM_MODE_SCALE_NONE` and `DRM_MODE_SCALE_ASPECT`
+/// ("Full aspect": the whole picture, its shape kept, centered).
+const SCALING_MODE: &[u8] = b"scaling mode";
+const SCALE_NONE: u64 = 0;
+const SCALE_ASPECT: u64 = 3;
+/// DRM's standard connector property holding the monitor's EDID as a blob
+/// (`drm_connector_update_edid_property`), 0 when it has none.
+const EDID: &[u8] = b"EDID";
+/// The longest EDID read: 256 blocks of 128 bytes.
+const EDID_BYTES: u32 = 256 * 128;
+/// A property's values read: the scaling mode has four.
+const PROPERTY_VALUES: usize = 8;
 /// `DRM_FORMAT_XRGB8888`: blue in the low byte of the little-endian pixel.
 const XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
 const BYTES_PER_PIXEL: u32 = 4;
@@ -204,6 +233,60 @@ struct PageFlip {
     user_data: u64,
 }
 
+/// `struct drm_crtc_get_sequence`: a controller's vertical blank count and
+/// when its last one began, on Linux's monotonic clock.
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+struct CrtcSequence {
+    crtc: u32,
+    active: u32,
+    sequence: u64,
+    sequence_ns: i64,
+}
+
+/// `struct drm_mode_obj_get_properties`.
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+struct ObjectProperties {
+    properties: u64,
+    values: u64,
+    count: u32,
+    id: u32,
+    kind: u32,
+}
+
+/// `struct drm_mode_get_property`.
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+struct PropertyInfo {
+    values: u64,
+    enums: u64,
+    id: u32,
+    flags: u32,
+    name: [u8; 32],
+    value_count: u32,
+    enum_count: u32,
+}
+
+/// `struct drm_mode_get_blob`.
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+struct Blob {
+    id: u32,
+    length: u32,
+    data: u64,
+}
+
+/// `struct drm_mode_obj_set_property`.
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+struct SetProperty {
+    value: u64,
+    id: u32,
+    object: u32,
+    kind: u32,
+}
+
 /// What stops the display.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -221,6 +304,8 @@ pub enum Error {
     FrameSize { expected: usize, actual: usize },
     /// Storage for the mode or resource lists could not be allocated.
     Allocation,
+    /// The display does not run the refresh rate asked for.
+    NoRate,
 }
 
 /// A DRM primary node of the bound GPU.
@@ -258,9 +343,17 @@ struct Buffer {
 struct Head {
     crtc: u32,
     connector: u32,
-    /// The connector's encoders, which no other head may use.
-    encoders: Vec<u32>,
+    /// The connector's kind and number among its kind.
+    port: Port,
+    /// The encoder counted as this head's: one of its connector's, which no
+    /// other head is given ([`free_encoder`]).
+    encoder: u32,
+    /// The mode the controller is set to, of the display's size. A scaled
+    /// output's is another output's mode, which the driver takes as the
+    /// picture's size and timing only.
     mode: ModeInfo,
+    /// The output runs its native mode, which its scaler fills.
+    scaling: Option<Scaling>,
     /// The connector was last read disconnected ([`Display::watch`]).
     lost: bool,
     /// Restores tried since the connector was last read disconnected.
@@ -268,6 +361,23 @@ struct Head {
     /// Not the first head: its flip to the newest buffer is still to be
     /// requested.
     behind: bool,
+}
+
+/// How a scaled output shows the picture.
+#[derive(Clone, Copy, Debug)]
+struct Scaling {
+    /// The connector's "scaling mode" property.
+    property: u32,
+    /// The mode the monitor runs.
+    native: ModeInfo,
+}
+
+/// A scaled output, for the report: the size its monitor runs and the
+/// size the picture fills of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Scaled {
+    pub native: (u32, u32),
+    pub picture: (u32, u32),
 }
 
 /// The outputs a [`Display`] runs.
@@ -280,6 +390,9 @@ pub struct Display<D> {
     refresh: u32,
     /// The monitor's image size in millimetres, when its EDID gave one.
     size_mm: Option<(u32, u32)>,
+    /// The EDID of the monitor on the output that gives the picture, when
+    /// the connector has one.
+    edid: Option<Vec<u8>>,
     /// What the engine reads, then the one the next frame fills.
     /// The newest frame, the one before it and the one that shows neither.
     buffers: [Buffer; 3],
@@ -295,18 +408,32 @@ pub struct Display<D> {
     heads: Vec<Head>,
     /// Every controller of the card.
     crtcs: Vec<u32>,
-    /// The connectors not shown, each with whether it was read connected
-    /// and tried since it was last read disconnected.
-    others: Vec<(u32, bool)>,
+    /// The connectors not shown, each with the looks that tried to show it
+    /// since it was last read disconnected, up to [`RESTORE_TRIES`].
+    others: Vec<(u32, u8)>,
+    /// Connected outputs the take left dark whose native size is smaller
+    /// than the picture.
+    smaller: usize,
+    /// The first scaling request the driver refused at the take: reading
+    /// or setting a connector's scaling, which left that output dark.
+    refused: Option<Error>,
     /// Every shown output's controller is off: display sleep.
     dark: bool,
     /// The power [`Self::set_power`] asked for, not yet requested.
     power: Option<bool>,
+    /// The first output's modes of the display's size the guest can be told
+    /// of, fastest first, one a refresh: the rates [`Self::set_refresh`]
+    /// switches between.
+    rates: Vec<ModeInfo>,
+    /// The mode [`Self::set_refresh`] asked for, not yet set.
+    retime: Option<ModeInfo>,
 }
 
-/// Looks at which a shown output connected again is set once more, before
-/// it is left dark until it is connected again: a monitor whose EDID is
-/// read late, or whose link trains at the second set.
+/// Looks at which a shown output connected again is set once more, or a
+/// connected output not shown is tried again, before it is left dark until
+/// it is connected again: a monitor whose EDID is read late, which lists
+/// only a fallback mode or none until then, or whose link trains at the
+/// second set.
 const RESTORE_TRIES: u8 = 3;
 
 /// What [`Display::watch`] read of the connectors since the last read.
@@ -317,7 +444,7 @@ pub struct Watched {
     /// Shown outputs connected again, their modes set again.
     pub restored: u32,
     /// Shown outputs connected again, now left dark: the monitor lists no
-    /// mode of the display's size.
+    /// mode of the display's size and cannot be scaled to it.
     pub modeless: u32,
     /// Shown outputs connected again, now left dark: the driver refused
     /// the mode set.
@@ -327,9 +454,15 @@ pub struct Watched {
     pub error: Option<Error>,
     /// Outputs connected that now show the picture too.
     pub joined: u32,
-    /// Outputs connected that cannot show it: no mode of its size, or no
-    /// free controller or encoder.
+    /// Outputs connected that cannot show it after their last try: no mode
+    /// of its size and no scaling to it, or no free controller or encoder.
     pub unshown: u32,
+    /// Of the outputs joined or restored, those scaled: no mode of the
+    /// display's size, a larger native one.
+    pub scaled: u32,
+    /// Of the outputs left dark, those whose native size is smaller than
+    /// the display's in a direction: they would need shrinking.
+    pub smaller: u32,
 }
 
 // SAFETY: the buffers' mappings go with the display, which one PE uses at a
@@ -338,12 +471,23 @@ unsafe impl<D: Send> Send for Display<D> {}
 
 /// What [`Display::restore`] did.
 enum Restore {
-    /// The output runs the picture again.
-    Set,
+    /// The output runs the picture again, scaled or not.
+    Set { scaled: bool },
     /// The probe read it disconnected.
     Gone,
-    /// It lists no mode of the display's size; its controller is untouched.
-    NoMode,
+    /// It lists no mode of the display's size and cannot be scaled to it,
+    /// its native size smaller than it or not; its controller is untouched.
+    NoMode { smaller: bool },
+}
+
+/// What [`Display::join`] did.
+enum Joined {
+    /// The output shows the picture, scaled or not.
+    Shown { scaled: bool },
+    /// It stays dark: no free controller or encoder, or no mode of the
+    /// display's size and no larger native one it can scale to, its native
+    /// size smaller than the picture or not.
+    Dark { smaller: bool },
 }
 
 /// A complete frame in the hidden buffer. Dropping it leaves the display
@@ -427,7 +571,26 @@ pub struct Seen {
     pub encoders: usize,
 }
 
-impl core::fmt::Display for Seen {
+/// A connector's kind (`DRM_MODE_CONNECTOR_*`) and its number among its
+/// kind, shown as Linux names it, as `eDP-1`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Port {
+    kind: u32,
+    index: u32,
+}
+
+/// `DRM_MODE_CONNECTOR_LVDS`, `_eDP` and `_DSI`: a built-in panel.
+const PANELS: [u32; 3] = [7, 14, 16];
+
+impl Port {
+    /// A laptop's built-in panel, whose backlight its firmware or driver
+    /// controls apart from the picture.
+    pub fn panel(self) -> bool {
+        PANELS.contains(&self.kind)
+    }
+}
+
+impl core::fmt::Display for Port {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         // Linux's `drm_connector_enum_list` names.
         const KINDS: [&str; 21] = [
@@ -454,14 +617,24 @@ impl core::fmt::Display for Seen {
             "USB",
         ];
         let kind = KINDS.get(self.kind as usize).copied().unwrap_or(KINDS[0]);
+        write!(f, "{kind}-{}", self.index)
+    }
+}
+
+impl core::fmt::Display for Seen {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let port = Port {
+            kind: self.kind,
+            index: self.index,
+        };
         let state = match self.connected {
             true => "connected",
             false => "not connected",
         };
         write!(
             f,
-            "{kind}-{} {state} modes={} encoders={}",
-            self.index, self.modes, self.encoders
+            "{port} {state} modes={} encoders={}",
+            self.modes, self.encoders
         )
     }
 }
@@ -581,13 +754,19 @@ fn free_crtc(reach: u32, crtcs: &[u32], heads: &[Head]) -> Option<u32> {
         .map(|(_, &crtc)| crtc)
 }
 
-/// Whether an output of `encoders` can join `heads` without taking an
-/// encoder one of them may use: the driver would move it, and that output
-/// would go dark.
-fn encoders_free(encoders: &[u32], heads: &[Head]) -> bool {
-    heads
+/// The first of an output's `encoders` that no head of `heads` is given.
+/// An encoder drives one controller at a time, so an output joins only
+/// with one of its own free: where two outputs share their one encoder,
+/// as a DVI-I and a VGA connector on one converter, the driver would move
+/// it and the first would go dark. A DisplayPort hub's outputs (MST) each
+/// list the same encoders, one a controller, of which the driver takes
+/// the one of the controller set, so each output of the hub shows while
+/// one is free, as Linux's fbdev helper lights them.
+fn free_encoder(encoders: &[u32], heads: &[Head]) -> Option<u32> {
+    encoders
         .iter()
-        .all(|head| head.encoders.iter().all(|used| !encoders.contains(used)))
+        .copied()
+        .find(|&encoder| heads.iter().all(|head| head.encoder != encoder))
 }
 
 /// Whether whoever shows the output's picture to the guest can describe a
@@ -610,15 +789,37 @@ fn size_of_mode(mode: &ModeInfo) -> (u32, u32) {
     (u32::from(mode.hdisplay), u32::from(mode.vdisplay))
 }
 
-/// `modes`' mode of `size` that `fits`, else its first of that size. Linux
-/// lists the faster of each size first, so this is the size's fastest mode
-/// the guest can be told of. A monitor's fastest mode may not fit, as
-/// 2560x1440 at 180 Hz.
+/// `modes`' fastest progressive mode of `size` that `fits`, the first of
+/// equals, else its first of that size. Linux sorts a preferred mode ahead
+/// of faster ones of its size (`drm_mode_compare`), and a monitor's
+/// preferred timing is often its 60 Hz one, with its 144 or 240 Hz modes
+/// in an extension, so the first listed is not the fastest. A monitor's
+/// fastest mode may not fit, as one past the guest's timing record's
+/// clock.
+/// The progressive modes of `size` in `modes` that `fits`, fastest first,
+/// the first DRM lists of each refresh.
+fn rates_of(modes: &[ModeInfo], size: (u32, u32), fits: Fits<'_>) -> Vec<ModeInfo> {
+    let mut rates: Vec<ModeInfo> = modes
+        .iter()
+        .filter(|mode| {
+            size_of_mode(mode) == size
+                && mode.flags & INTERLACED == 0
+                && fits(size.0, size.1, refresh(mode))
+        })
+        .copied()
+        .collect();
+    rates.sort_by_key(|mode| core::cmp::Reverse(refresh(mode)));
+    rates.dedup_by_key(|mode| refresh(mode));
+    rates
+}
+
 fn mode_of(modes: &[ModeInfo], size: (u32, u32), fits: Fits<'_>) -> Option<ModeInfo> {
     let mut sized = modes.iter().filter(|mode| size_of_mode(mode) == size);
     let fitting = sized
         .clone()
-        .find(|mode| fits(size.0, size.1, refresh(mode)));
+        .filter(|mode| mode.flags & INTERLACED == 0 && fits(size.0, size.1, refresh(mode)))
+        .rev()
+        .max_by_key(|mode| refresh(mode));
     fitting.or_else(|| sized.next()).copied()
 }
 
@@ -723,6 +924,214 @@ fn plan(outputs: &[&[ModeInfo]], wanted: Wanted, fits: Fits<'_>) -> Option<((u32
 fn choose(modes: &[ModeInfo], wanted: Wanted, fits: Fits<'_>) -> Option<ModeInfo> {
     let (size, _) = plan(&[modes], wanted, fits)?;
     mode_of(modes, size, fits)
+}
+
+/// How an output after the first shows a picture of the display's size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fit {
+    /// Its own mode of that size ([`mode_of`]).
+    Mode(ModeInfo),
+    /// Its native mode, at least the picture's size in both directions,
+    /// which its scaler fills with the picture.
+    Scaled(ModeInfo),
+    /// Its native mode, narrower or shorter than the picture: it would
+    /// need shrinking.
+    Smaller(ModeInfo),
+    /// It lists no mode.
+    Nothing,
+}
+
+/// How an output with `modes` shows a picture of `size` ([`Fit`]).
+fn fit(modes: &[ModeInfo], size: (u32, u32)) -> Fit {
+    if let Some(mode) = mode_of(modes, size, &|_, _, _| true) {
+        return Fit::Mode(mode);
+    }
+    let Some(native) = native(modes) else {
+        return Fit::Nothing;
+    };
+    let (width, height) = size_of_mode(&native);
+    match width >= size.0 && height >= size.1 {
+        true => Fit::Scaled(native),
+        false => Fit::Smaller(native),
+    }
+}
+
+/// The mode a driver runs where the connector's picture is scaled: its
+/// native mode, as Linux's nouveau finds it among the modes it lists, which
+/// are the valid ones; the preferred one, else the widest, then tallest,
+/// then fastest in whole hertz, the last of equals; never an interlaced
+/// one.
+fn native(modes: &[ModeInfo]) -> Option<ModeInfo> {
+    let progressive = || modes.iter().filter(|mode| mode.flags & INTERLACED == 0);
+    progressive()
+        .find(|mode| mode.kind & PREFERRED != 0)
+        .or_else(|| {
+            progressive()
+                .max_by_key(|mode| (mode.hdisplay, mode.vdisplay, (refresh(mode) + 500) / 1000))
+        })
+        .copied()
+}
+
+/// The part of a `native` raster a `picture` fills, scaled with its shape
+/// kept, as Linux's nouveau computes "Full aspect" in 1/2^19 steps; the
+/// rest is black on two sides.
+fn letterbox(picture: (u32, u32), native: (u32, u32)) -> (u32, u32) {
+    let (in_w, in_h) = (u64::from(picture.0), u64::from(picture.1));
+    let (out_w, out_h) = (u64::from(native.0), u64::from(native.1));
+    if in_w == 0 || in_h == 0 {
+        return native;
+    }
+    let scaled = |out: u64, of: u64, by: u64| {
+        let ratio = (of << 19) / by;
+        u32::try_from((out * ratio + ratio / 2) >> 19).unwrap_or(u32::MAX)
+    };
+    match out_w * in_h > in_w * out_h {
+        true => (scaled(out_h, in_w, in_h), native.1),
+        false => (native.0, scaled(out_w, in_h, in_w)),
+    }
+}
+
+/// Connector `id`'s "scaling mode" property, where it offers both no
+/// scaling and "Full aspect". Reading it does not probe the connector.
+fn scaler<D: Drm>(drm: &mut D, id: u32) -> Result<Option<u32>, Error> {
+    let mut sized = ObjectProperties {
+        id,
+        kind: OBJECT_CONNECTOR,
+        ..ObjectProperties::default()
+    };
+    call(drm, OBJECT_PROPERTIES, &mut sized)?;
+    let mut properties = list::<u32>(sized.count)?;
+    let mut values = list::<u64>(sized.count)?;
+    let mut described = ObjectProperties {
+        properties: properties.as_mut_ptr() as u64,
+        values: values.as_mut_ptr() as u64,
+        count: properties.len() as u32,
+        id,
+        kind: OBJECT_CONNECTOR,
+    };
+    call(drm, OBJECT_PROPERTIES, &mut described)?;
+    properties.truncate(described.count as usize);
+    for property in properties {
+        let mut offered = [0u64; PROPERTY_VALUES];
+        let mut info = PropertyInfo {
+            values: offered.as_mut_ptr() as u64,
+            value_count: PROPERTY_VALUES as u32,
+            id: property,
+            ..PropertyInfo::default()
+        };
+        call(drm, GET_PROPERTY, &mut info)?;
+        let length = info.name.iter().position(|&byte| byte == 0);
+        let name = &info.name[..length.unwrap_or(info.name.len())];
+        let offered = &offered[..PROPERTY_VALUES.min(info.value_count as usize)];
+        if name == SCALING_MODE && offered.contains(&SCALE_NONE) && offered.contains(&SCALE_ASPECT)
+        {
+            return Ok(Some(property));
+        }
+    }
+    Ok(None)
+}
+
+/// Connector `id`'s EDID, from its "EDID" blob property, as the driver
+/// last read it from the monitor: `None` when it has none or one longer
+/// than [`EDID_BYTES`]. Reading it does not probe the connector.
+fn edid<D: Drm>(drm: &mut D, id: u32) -> Result<Option<Vec<u8>>, Error> {
+    let mut sized = ObjectProperties {
+        id,
+        kind: OBJECT_CONNECTOR,
+        ..ObjectProperties::default()
+    };
+    call(drm, OBJECT_PROPERTIES, &mut sized)?;
+    let mut properties = list::<u32>(sized.count)?;
+    let mut values = list::<u64>(sized.count)?;
+    let mut described = ObjectProperties {
+        properties: properties.as_mut_ptr() as u64,
+        values: values.as_mut_ptr() as u64,
+        count: properties.len() as u32,
+        id,
+        kind: OBJECT_CONNECTOR,
+    };
+    call(drm, OBJECT_PROPERTIES, &mut described)?;
+    let count = (described.count as usize).min(properties.len());
+    for (&property, &value) in properties[..count].iter().zip(&values[..count]) {
+        let mut info = PropertyInfo {
+            id: property,
+            ..PropertyInfo::default()
+        };
+        call(drm, GET_PROPERTY, &mut info)?;
+        let length = info.name.iter().position(|&byte| byte == 0);
+        if &info.name[..length.unwrap_or(info.name.len())] != EDID {
+            continue;
+        }
+        let Ok(blob) = u32::try_from(value) else {
+            return Ok(None);
+        };
+        if blob == 0 {
+            return Ok(None);
+        }
+        let mut asked = Blob {
+            id: blob,
+            ..Blob::default()
+        };
+        call(drm, GET_BLOB, &mut asked)?;
+        if asked.length == 0 || asked.length > EDID_BYTES {
+            return Ok(None);
+        }
+        let mut bytes = list::<u8>(asked.length)?;
+        // Linux copies the blob only when the length asked is its own.
+        let mut read = Blob {
+            id: blob,
+            length: asked.length,
+            data: bytes.as_mut_ptr() as u64,
+        };
+        call(drm, GET_BLOB, &mut read)?;
+        return Ok((read.length == asked.length).then_some(bytes));
+    }
+    Ok(None)
+}
+
+/// Set connector `id`'s scaling `property` to `value`. The connector must
+/// run no controller: the change then needs no mode set, and the next one
+/// takes it.
+fn set_scaling<D: Drm>(drm: &mut D, id: u32, property: u32, value: u64) -> Result<(), Error> {
+    let mut set = SetProperty {
+        value,
+        id: property,
+        object: id,
+        kind: OBJECT_CONNECTOR,
+    };
+    call(drm, SET_OBJECT_PROPERTY, &mut set)
+}
+
+/// What [`follow`] found an output runs.
+enum Follow {
+    /// This mode, scaled or not.
+    Run(ModeInfo, Option<Scaling>),
+    /// Nothing: it stays dark, its native size smaller than the picture or
+    /// not.
+    Dark { smaller: bool },
+}
+
+/// What an output after the first with `modes` on connector `id` runs to
+/// show a picture of `size`, whose mode on the first output is `timing`:
+/// its own mode of the size, else `timing` scaled to its native mode where
+/// that is no smaller and the connector can scale. The connector's
+/// properties are read only for that.
+fn follow<D: Drm>(
+    drm: &mut D,
+    id: u32,
+    modes: &[ModeInfo],
+    size: (u32, u32),
+    timing: ModeInfo,
+) -> Result<Follow, Error> {
+    Ok(match fit(modes, size) {
+        Fit::Mode(mode) => Follow::Run(mode, None),
+        Fit::Scaled(native) => match scaler(drm, id)? {
+            Some(property) => Follow::Run(timing, Some(Scaling { property, native })),
+            None => Follow::Dark { smaller: false },
+        },
+        Fit::Smaller(_) => Follow::Dark { smaller: true },
+        Fit::Nothing => Follow::Dark { smaller: false },
+    })
 }
 
 /// One buffer of the mode's size, with its framebuffer and mapping. A
@@ -856,10 +1265,11 @@ impl<D: Drm> Display<D> {
     }
 
     /// [`Self::take`] in the size [`plan`] picks for [`Wanted`] and `fits`.
-    /// Every connected output with a mode of that size, a controller no
-    /// other output runs and encoders of its own shows the picture; the
+    /// Every connected output with a controller no other output runs and
+    /// a free encoder of its own ([`free_encoder`]) shows the picture: the
     /// output that gives the guest's mode is set first, and its refusal
-    /// stops the take. A refusal of another leaves it dark.
+    /// stops the take; each other in its mode of that size, else scaled
+    /// ([`follow`]). A refusal of another leaves it dark.
     pub fn take_fitting(mut drm: D, wanted: Wanted, fits: Fits<'_>) -> Result<Self, Error> {
         let (crtcs, connectors) = resources(&mut drm)?;
         let mut usable = Vec::new();
@@ -870,8 +1280,14 @@ impl<D: Drm> Display<D> {
                 true => reach(&mut drm, &found.encoders, &crtcs)?,
                 false => 0,
             };
+            // Encoders that reach no controller stay so. A connected output
+            // that lists no mode yet is tried again: its EDID may read at a
+            // later probe.
             match reach {
-                0 => others.push((id, found.connected)),
+                0 if found.connected && !found.modes.is_empty() => {
+                    others.push((id, RESTORE_TRIES));
+                }
+                0 => others.push((id, u8::from(found.connected))),
                 _ => usable.push((id, found, reach)),
             }
         }
@@ -883,30 +1299,63 @@ impl<D: Drm> Display<D> {
         };
         let first = usable.remove(first);
         let [width, height] = first.1.size_mm;
-        let mut heads = Vec::new();
+        // The monitor's identity for the guest; one the connector cannot
+        // give leaves the size alone to name it.
+        let edid = edid(&mut drm, first.0).ok().flatten();
+        let mut heads: Vec<Head> = Vec::new();
+        let rates = rates_of(&first.1.modes, size, fits);
+        let (mut smaller, mut refused) = (0, None);
         for (id, found, reach) in core::iter::once(first).chain(usable) {
-            let fitting: Fits<'_> = match heads.is_empty() {
-                true => fits,
-                false => &|_, _, _| true,
+            let free = free_crtc(reach, &crtcs, &heads).zip(free_encoder(&found.encoders, &heads));
+            let Some((crtc, encoder)) = free else {
+                others.push((id, RESTORE_TRIES));
+                continue;
             };
-            let crtc =
-                free_crtc(reach, &crtcs, &heads).filter(|_| encoders_free(&found.encoders, &heads));
-            match (mode_of(&found.modes, size, fitting), crtc) {
-                (Some(mode), Some(crtc)) => heads.push(Head {
+            let run = match heads.first() {
+                None => mode_of(&found.modes, size, fits).map(|mode| (mode, None)),
+                Some(shown) => match follow(&mut drm, id, &found.modes, size, shown.mode) {
+                    Ok(Follow::Run(mode, scaling)) => Some((mode, scaling)),
+                    Ok(Follow::Dark { smaller: dark }) => {
+                        smaller += usize::from(dark);
+                        None
+                    }
+                    Err(error) => {
+                        refused.get_or_insert(error);
+                        None
+                    }
+                },
+            };
+            match run {
+                Some((mode, scaling)) => heads.push(Head {
                     crtc,
                     connector: id,
-                    encoders: found.encoders,
+                    port: Port {
+                        kind: found.kind,
+                        index: found.index,
+                    },
+                    encoder,
                     mode,
+                    scaling,
                     lost: false,
                     tries: 0,
                     behind: false,
                 }),
-                _ => others.push((id, true)),
+                // Its mode list may still be a fallback until its EDID reads.
+                None => others.push((id, 1)),
             }
         }
         let display = Self::run(drm, heads, crtcs, others)?;
+        // The rates hold the mode set, which may be one that does not fit.
+        let rates = match display.heads[0].mode {
+            set if rates.iter().any(|mode| refresh(mode) == refresh(&set)) => rates,
+            set => alloc::vec![set],
+        };
         Ok(Self {
             size_mm: (width != 0 && height != 0).then_some((width, height)),
+            edid,
+            rates,
+            smaller,
+            refused: refused.or(display.refused),
             ..display
         })
     }
@@ -917,7 +1366,7 @@ impl<D: Drm> Display<D> {
         mut drm: D,
         mut heads: Vec<Head>,
         crtcs: Vec<u32>,
-        mut others: Vec<(u32, bool)>,
+        mut others: Vec<(u32, u8)>,
     ) -> Result<Self, Error> {
         let Some(mode) = heads.first().map(|head| head.mode) else {
             return Err(Error::NoOutput);
@@ -943,6 +1392,7 @@ impl<D: Drm> Display<D> {
             height,
             refresh: refresh(&mode),
             size_mm: None,
+            edid: None,
             buffers,
             // Each buffer holds black, and the front the console's text.
             stale: [0..height as usize, 0..height as usize, 0..height as usize],
@@ -951,8 +1401,12 @@ impl<D: Drm> Display<D> {
             heads,
             crtcs,
             others: Vec::new(),
+            smaller: 0,
+            refused: None,
             dark: false,
             power: None,
+            rates: Vec::new(),
+            retime: None,
         };
         if let Err(error) = display.set_mode(0) {
             release_all(&mut display.drm, &display.buffers);
@@ -961,13 +1415,33 @@ impl<D: Drm> Display<D> {
         for head in rest {
             display.heads.push(head);
             let last = display.heads.len() - 1;
-            if display.set_mode(last).is_err() {
+            if let Err(error) = display.light(last) {
                 let head = display.heads.remove(last);
-                others.push((head.connector, true));
+                if head.scaling.is_some() {
+                    display.refused.get_or_insert(error);
+                }
+                // Its link may train at a later set.
+                others.push((head.connector, 1));
             }
         }
         display.others = others;
         Ok(display)
+    }
+
+    /// Light head `index`, which runs no controller: its scaling set when
+    /// it is scaled, then its mode. A refused mode set puts the
+    /// connector's scaling back.
+    fn light(&mut self, index: usize) -> Result<(), Error> {
+        let Some(scaling) = self.heads[index].scaling else {
+            return self.set_mode(index);
+        };
+        let connector = self.heads[index].connector;
+        set_scaling(&mut self.drm, connector, scaling.property, SCALE_ASPECT)?;
+        let set = self.set_mode(index);
+        if set.is_err() {
+            let _ = set_scaling(&mut self.drm, connector, scaling.property, SCALE_NONE);
+        }
+        set
     }
 
     /// Run head `index`'s controller in its mode on its connector, showing
@@ -1054,17 +1528,22 @@ impl<D: Drm> Display<D> {
     /// is probed, as the monitor may be another one, and set in a mode of
     /// the display's size from its new list: the mode it ran where the list
     /// still has it, else one of that size at the same refresh, else the
-    /// size's first. Its controller is turned off first: a full mode set,
-    /// which trains a DisplayPort link anew, where an unchanged one would
-    /// change nothing. With no mode of the size the controller is not
-    /// touched. Either failure leaves it lost, tried at the next reads up
-    /// to [`RESTORE_TRIES`] looks, then counted once and left dark until it
-    /// is connected again.
+    /// size's first, else scaled into a native mode no smaller ([`follow`]).
+    /// Its controller is turned off first: a full mode set, which trains a
+    /// DisplayPort link anew, where an unchanged one would change nothing.
+    /// With no way to show the size the controller is not touched. Either
+    /// failure leaves it lost, tried at the next reads up to
+    /// [`RESTORE_TRIES`] looks, then counted once and left dark until it is
+    /// connected again.
     ///
     /// An output not shown, connected since it was last read disconnected
-    /// or since the take, is probed once and joins the picture in its mode
-    /// of the display's size on a free controller, else stays dark until it
-    /// is connected again.
+    /// or since the take, or left dark by the take for its modes or a
+    /// refused mode set, is probed and joins the picture on a free
+    /// controller in its mode of the display's size, else scaled. One that
+    /// cannot is tried at the next reads up to [`RESTORE_TRIES`] looks in
+    /// all, as its EDID may read late, then counted once and left dark
+    /// until it is connected again. One the take found no free controller
+    /// or encoder for is not tried again.
     ///
     /// A refused request stops only the output it was for: the others are
     /// still read and set, and the first refusal is in [`Watched::error`].
@@ -1095,14 +1574,18 @@ impl<D: Drm> Display<D> {
                     head.tries += 1;
                     let last = head.tries == RESTORE_TRIES;
                     match self.restore(index, &mut watched) {
-                        Ok(Restore::Set) => {
+                        Ok(Restore::Set { scaled }) => {
                             self.heads[index].lost = false;
                             watched.restored += 1;
+                            watched.scaled += u32::from(scaled);
                         }
                         // Read disconnected after all: the next read that
                         // finds it connected tries again.
                         Ok(Restore::Gone) => self.heads[index].tries = 0,
-                        Ok(Restore::NoMode) => watched.modeless += u32::from(last),
+                        Ok(Restore::NoMode { smaller }) => {
+                            watched.modeless += u32::from(last);
+                            watched.smaller += u32::from(last && smaller);
+                        }
                         Err(error) => {
                             watched.error.get_or_insert(error);
                             watched.refused += u32::from(last);
@@ -1113,12 +1596,12 @@ impl<D: Drm> Display<D> {
             }
         }
         let mut index = 0;
-        while let Some(&(id, tried)) = self.others.get(index) {
+        while let Some(&(id, tries)) = self.others.get(index) {
             index += 1;
             match detected_on(&mut self.drm, id) {
                 Ok(true) => {}
                 Ok(false) => {
-                    self.others[index - 1].1 = false;
+                    self.others[index - 1].1 = 0;
                     continue;
                 }
                 Err(error) => {
@@ -1126,20 +1609,25 @@ impl<D: Drm> Display<D> {
                     continue;
                 }
             }
-            if tried || self.dark {
+            if tries >= RESTORE_TRIES || self.dark {
                 continue;
             }
-            self.others[index - 1].1 = true;
+            self.others[index - 1].1 = tries + 1;
+            let last = tries + 1 == RESTORE_TRIES;
             match self.join(id) {
-                Ok(true) => {
+                Ok(Joined::Shown { scaled }) => {
                     self.others.remove(index - 1);
                     index -= 1;
                     watched.joined += 1;
+                    watched.scaled += u32::from(scaled);
                 }
-                Ok(false) => watched.unshown += 1,
+                Ok(Joined::Dark { smaller }) => {
+                    watched.unshown += u32::from(last);
+                    watched.smaller += u32::from(last && smaller);
+                }
                 Err(error) => {
                     watched.error.get_or_insert(error);
-                    watched.unshown += 1;
+                    watched.unshown += u32::from(last);
                 }
             }
         }
@@ -1149,13 +1637,14 @@ impl<D: Drm> Display<D> {
     /// Set head `index` again on its connector as its driver reads it now
     /// ([`Self::watch`]).
     fn restore(&mut self, index: usize, watched: &mut Watched) -> Result<Restore, Error> {
-        let found = output(&mut self.drm, self.heads[index].connector)?;
+        let connector = self.heads[index].connector;
+        let found = output(&mut self.drm, connector)?;
         if !found.connected {
             return Ok(Restore::Gone);
         }
         let ran = self.heads[index].mode;
         let size = (self.width, self.height);
-        let mode = found
+        let own = found
             .modes
             .iter()
             .find(|&&mode| mode == ran)
@@ -1167,53 +1656,90 @@ impl<D: Drm> Display<D> {
             })
             .copied()
             .or_else(|| mode_of(&found.modes, size, &|_, _, _| true));
-        let Some(mode) = mode else {
-            return Ok(Restore::NoMode);
+        // Every head's mode is of the display's size, so the one it ran
+        // serves as a scaled picture's timing.
+        let (mode, scaling) = match own {
+            Some(mode) => (mode, None),
+            None => match follow(&mut self.drm, connector, &found.modes, size, ran)? {
+                Follow::Run(mode, scaling) => (mode, scaling),
+                Follow::Dark { smaller } => return Ok(Restore::NoMode { smaller }),
+            },
         };
+        let was = self.heads[index].scaling;
         self.heads[index].mode = mode;
+        self.heads[index].scaling = scaling;
         // A refused off still leaves the set to try.
         if let Err(error) = self.crtc_off(index) {
             watched.error.get_or_insert(error);
         }
-        self.set_mode(index)?;
-        Ok(Restore::Set)
+        // A monitor that has the size now runs it unscaled.
+        if let (Some(was), None) = (was, scaling)
+            && let Err(error) = set_scaling(&mut self.drm, connector, was.property, SCALE_NONE)
+        {
+            watched.error.get_or_insert(error);
+        }
+        self.light(index)?;
+        Ok(Restore::Set {
+            scaled: scaling.is_some(),
+        })
     }
 
-    /// Show the picture on connector `id` as well, where it has a mode of
-    /// the display's size, a free controller and encoders of its own.
-    fn join(&mut self, id: u32) -> Result<bool, Error> {
+    /// Show the picture on connector `id` as well, where it has a free
+    /// controller and a free encoder of its own, in its mode of the
+    /// display's size or scaled ([`follow`]).
+    fn join(&mut self, id: u32) -> Result<Joined, Error> {
         let found = output(&mut self.drm, id)?;
         let reach = reach(&mut self.drm, &found.encoders, &self.crtcs)?;
-        let mode = mode_of(&found.modes, (self.width, self.height), &|_, _, _| true);
-        let crtc = free_crtc(reach, &self.crtcs, &self.heads)
-            .filter(|_| encoders_free(&found.encoders, &self.heads));
-        let (Some(mode), Some(crtc), true) = (mode, crtc, found.connected) else {
-            return Ok(false);
+        let free = free_crtc(reach, &self.crtcs, &self.heads)
+            .zip(free_encoder(&found.encoders, &self.heads));
+        let (Some((crtc, encoder)), Some(shown), true) =
+            (free, self.heads.first(), found.connected)
+        else {
+            return Ok(Joined::Dark { smaller: false });
+        };
+        let size = (self.width, self.height);
+        let (mode, scaling) = match follow(&mut self.drm, id, &found.modes, size, shown.mode)? {
+            Follow::Run(mode, scaling) => (mode, scaling),
+            Follow::Dark { smaller } => return Ok(Joined::Dark { smaller }),
         };
         self.heads.push(Head {
             crtc,
             connector: id,
-            encoders: found.encoders,
+            port: Port {
+                kind: found.kind,
+                index: found.index,
+            },
+            encoder,
             mode,
+            scaling,
             lost: false,
             tries: 0,
             behind: false,
         });
         let last = self.heads.len() - 1;
-        if self.set_mode(last).is_err() {
+        if let Err(error) = self.light(last) {
             self.heads.remove(last);
-            return Ok(false);
+            return match scaling {
+                Some(_) => Err(error),
+                None => Ok(Joined::Dark { smaller: false }),
+            };
         }
-        Ok(true)
+        Ok(Joined::Shown {
+            scaled: scaling.is_some(),
+        })
     }
 
-    /// Give the outputs back: each controller turned off, then the buffers,
-    /// their mappings and framebuffers, and the node, for its owner to
-    /// close. A refused request leaves what it names with the node, whose
-    /// close frees it.
+    /// Give the outputs back: each controller turned off and a scaled
+    /// connector's scaling put back, then the buffers, their mappings and
+    /// framebuffers, and the node, for its owner to close. A refused
+    /// request leaves what it names with the node, whose close frees it.
     pub fn release(mut self) -> D {
         for index in 0..self.heads.len() {
             let _ = self.crtc_off(index);
+            if let Some(scaling) = self.heads[index].scaling {
+                let connector = self.heads[index].connector;
+                let _ = set_scaling(&mut self.drm, connector, scaling.property, SCALE_NONE);
+            }
         }
         release_all(&mut self.drm, &self.buffers);
         self.drm
@@ -1224,10 +1750,39 @@ impl<D: Drm> Display<D> {
         self.heads.len()
     }
 
+    /// The connectors that show the picture, the one that paces it first.
+    pub fn ports(&self) -> impl Iterator<Item = Port> + '_ {
+        self.heads.iter().map(|head| head.port)
+    }
+
+    /// The outputs that show the picture scaled into their native mode.
+    pub fn scaled(&self) -> impl Iterator<Item = Scaled> + '_ {
+        let picture = (self.width, self.height);
+        self.heads.iter().filter_map(move |head| {
+            let native = size_of_mode(&head.scaling?.native);
+            Some(Scaled {
+                native,
+                picture: letterbox(picture, native),
+            })
+        })
+    }
+
+    /// How many connected outputs the take left dark because their native
+    /// size is smaller than the picture: showing them would need shrinking,
+    /// which is not asked of a scaler.
+    pub fn smaller(&self) -> usize {
+        self.smaller
+    }
+
+    /// The first scaling request the driver refused at the take.
+    pub fn refused(&self) -> Option<Error> {
+        self.refused
+    }
+
     /// How many connected outputs do not show it: no mode of its size, or
     /// no free controller or encoder, or a refused mode set.
     pub fn unshown(&self) -> usize {
-        self.others.iter().filter(|(_, tried)| *tried).count()
+        self.others.iter().filter(|(_, tries)| *tries != 0).count()
     }
 
     /// Pixels across and down.
@@ -1240,9 +1795,39 @@ impl<D: Drm> Display<D> {
         self.refresh
     }
 
+    /// When the first output's last vertical blank began, in nanoseconds
+    /// of Linux's monotonic clock: what the picture's flips land on. `None`
+    /// where a request must wait for another processor, while the outputs
+    /// are dark, or when the controller is off or the driver gives no time.
+    pub fn last_vblank_ns(&mut self) -> Option<u64> {
+        if self.dark || !self.drm.immediate() {
+            return None;
+        }
+        let mut sequence = CrtcSequence {
+            crtc: self.heads.first()?.crtc,
+            ..CrtcSequence::default()
+        };
+        let result = self
+            .drm
+            .control(CRTC_GET_SEQUENCE, ptr::from_mut(&mut sequence).cast());
+        if result != 0 || sequence.active == 0 {
+            return None;
+        }
+        u64::try_from(sequence.sequence_ns)
+            .ok()
+            .filter(|&ns| ns != 0)
+    }
+
     /// The monitor's image size in millimetres, when its EDID gave one.
     pub fn size_mm(&self) -> Option<(u32, u32)> {
         self.size_mm
+    }
+
+    /// The EDID of the monitor on the output that gives the picture (the
+    /// first, which also gives its size and refresh), as its connector
+    /// held it at the take; `None` when it held none.
+    pub fn edid(&self) -> Option<&[u8]> {
+        self.edid.as_deref()
     }
 
     /// The buffer on screen and the bytes between its rows, for what draws
@@ -1316,7 +1901,54 @@ impl<D: Drm> Display<D> {
     /// requested, or an output that follows the first waits for its flip
     /// to the newest buffer ([`Self::flush`]).
     pub fn queued(&self) -> bool {
-        self.queued || self.power.is_some() || self.heads.iter().any(|head| head.behind)
+        self.queued
+            || self.power.is_some()
+            || self.retime.is_some()
+            || self.heads.iter().any(|head| head.behind)
+    }
+
+    /// The refresh rates in millihertz the display runs its size at, fastest
+    /// first; the current one among them.
+    pub fn refresh_rates(&self) -> Vec<u32> {
+        self.rates.iter().map(refresh).collect()
+    }
+
+    /// Run the first output at `millihertz`, one of [`Self::refresh_rates`]:
+    /// at once where a request completes now, else at the next flush that
+    /// may. A rate it does not run is refused. The other outputs keep their
+    /// own modes and take its frames at their own blanks.
+    pub fn set_refresh(&mut self, millihertz: u32) -> Result<(), Error> {
+        let Some(&mode) = self.rates.iter().find(|mode| refresh(mode) == millihertz) else {
+            return Err(Error::NoRate);
+        };
+        self.retime = Some(mode);
+        self.apply_retime()
+    }
+
+    /// Set the mode [`Self::set_refresh`] asked for, where a request
+    /// completes now. A dark display takes it when it is lit again.
+    fn apply_retime(&mut self) -> Result<(), Error> {
+        if !self.drm.immediate() {
+            return Ok(());
+        }
+        let Some(mode) = self.retime.take() else {
+            return Ok(());
+        };
+        let previous = core::mem::replace(&mut self.heads[0].mode, mode);
+        if self.dark || self.heads[0].lost {
+            self.refresh = refresh(&mode);
+            return Ok(());
+        }
+        match self.set_mode(0) {
+            Ok(()) => {
+                self.refresh = refresh(&mode);
+                Ok(())
+            }
+            Err(error) => {
+                self.heads[0].mode = previous;
+                Err(error)
+            }
+        }
     }
 
     /// Request the queued frame's flip on the first output, if this
@@ -1330,6 +1962,11 @@ impl<D: Drm> Display<D> {
             return Ok(());
         }
         let mut flushed = self.apply_power();
+        if let Err(error) = self.apply_retime()
+            && flushed.is_ok()
+        {
+            flushed = Err(error);
+        }
         // An output that is off takes no flip: the newest frame waits.
         if self.dark {
             return flushed;

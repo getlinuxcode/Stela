@@ -1255,10 +1255,17 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let vertex_linked = self.link(&request.vertex_linked_functions, true)?;
         let fragment_linked = self.link(&request.fragment_linked_functions, true)?;
         let linkings = [&vertex_linked.linking, &fragment_linked.linking];
+        // Only a driver whose execution sets switch render pipelines gets
+        // them bindable: RADV's switch compute pipelines alone.
         let generated = self.backend.physical_device().limits.generated_commands;
-        // GPU-encoded commands bind no topology variants.
+        // GPU-encoded commands bind no topology variants, and only where the
+        // driver's execution sets switch both stages.
         let indirect_bindable = request.support_indirect_command_buffers
-            && generated.is_some()
+            && generated.is_some_and(|limits| {
+                limits
+                    .pipeline_stages
+                    .contains(ShaderStages::VERTEX | ShaderStages::FRAGMENT)
+            })
             && !self.needs_topology_variants(request.input_primitive_topology);
         // GPU-encoded commands bind no variants: the pipeline reads each
         // sampler's filter once its process has bicubic samplers.

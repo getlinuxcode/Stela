@@ -483,17 +483,6 @@ pub(crate) fn capture(requested: usize) -> Result<Region, Error> {
         }
         if info.is_healthy() {
             flags |= topology::HEALTHY;
-        } else if info.is_enabled() {
-            // Linux reads no health bit; Stela runs no PE on such an AP
-            // (`Processor::available`).
-            crate::output::arguments(format_args!(
-                "HOST PROCESSOR {number} {}\n",
-                if info.is_bsp() {
-                    "is the bootstrap processor and marked unhealthy by the firmware: used anyway"
-                } else {
-                    "left out: the firmware marks it unhealthy"
-                }
-            ));
         }
         let (location, thread) = if extended {
             let value = info.extended_information;
@@ -526,6 +515,26 @@ pub(crate) fn capture(requested: usize) -> Result<Region, Error> {
             location,
             thread,
         });
+    }
+    // Linux reads no health bit. Stela runs no PE on an AP the firmware
+    // marks unhealthy (`Processor::available`), unless the firmware marks
+    // the running bootstrap processor unhealthy too: its bits then report
+    // nothing.
+    if topology::ignore_unreported_health(&mut processors) {
+        crate::output::arguments(format_args!(
+            "HOST PROCESSORS the firmware marks the running bootstrap processor unhealthy, so \
+             its health bits report nothing: every enabled processor is used\n"
+        ));
+    } else {
+        for processor in &processors {
+            if processor.flags & topology::ENABLED != 0 && processor.flags & topology::HEALTHY == 0
+            {
+                crate::output::arguments(format_args!(
+                    "HOST PROCESSOR {} left out: the firmware marks it unhealthy\n",
+                    processor.processor_number
+                ));
+            }
+        }
     }
     if topology::locations_collide(&processors) {
         // Firmware that answers the query and fills no coordinates: every

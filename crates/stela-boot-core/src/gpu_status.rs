@@ -24,10 +24,29 @@ pub enum Reason {
     Other,
 }
 
-/// The screen line for the NVIDIA GPU `device` at PCI `address` that did
-/// not start for `reason`, `why` the refusal's own words (empty without
+/// The screen line for the GPU `device` of `vendor` at PCI `address` that
+/// did not start for `reason`, `why` the refusal's own words (empty without
 /// any): a screen is often all a report brings.
-pub fn refused(address: &str, device: u16, reason: Reason, why: &str) -> String {
+pub fn refused(vendor: Vendor, address: &str, device: u16, reason: Reason, why: &str) -> String {
+    if vendor != Vendor::Nvidia {
+        // A GPU of another maker that its driver's own table admitted.
+        let gpu = format!(
+            "the {} GPU at {address} (device {device:04x})",
+            maker(vendor)
+        );
+        return match (reason, why.is_empty()) {
+            (Reason::MissingFirmware, _) => format!(
+                "the USB has no firmware for {gpu}. On another computer, plug in this USB and \
+                 run `stela repair`"
+            ),
+            (Reason::Other, true) => {
+                format!("{gpu} did not start; the boot log on this USB says why")
+            }
+            (Reason::Other, false) => {
+                format!("{gpu} did not start: {why}. The boot log on this USB has the rest")
+            }
+        };
+    }
     match (nvidia_chip(device), reason) {
         (None, _) => format!(
             "the NVIDIA GPU at {address} (device {device:04x}) is not supported: Stela needs \
@@ -64,13 +83,43 @@ pub fn failed(adapters: &[Adapter], error: &str) -> String {
             ),
         })
         .collect();
-    let gpu = match named.is_empty() {
-        true => String::from("NVIDIA GPU"),
-        false => named.join(" and "),
+    // Without an NVIDIA GPU, the other adapters a driver was started for.
+    let others: Vec<String> = adapters
+        .iter()
+        .filter(|found| found.vendor != Vendor::Nvidia)
+        .map(|found| {
+            format!(
+                "{} GPU at {} (device {:04x})",
+                maker(found.vendor),
+                found.address,
+                found.device
+            )
+        })
+        .collect();
+    let gpu = match (named.is_empty(), others.is_empty()) {
+        (false, _) => named.join(" and "),
+        (true, false) => others.join(" and "),
+        (true, true) => String::from("NVIDIA GPU"),
     };
     format!(
         "the {gpu} could not start: {error}. macOS starts without it; the boot log on this USB \
          says why"
+    )
+}
+
+/// The screen line for the claimed GPU at PCI `address` that its Linux
+/// driver `driver` did not bind. `dark` when the firmware's picture was on
+/// it: the claim's reset ended that picture, so its display shows nothing
+/// and only another adapter's screen, or the log, carries this line.
+pub fn unbound(address: &str, driver: &str, dark: bool) -> String {
+    format!(
+        "the GPU at {address} did not start: its Linux driver {driver} did not bind it.{} The \
+         boot log on this USB says why",
+        if dark {
+            " The screen the PC started on is wired to it and stays dark."
+        } else {
+            ""
+        }
     )
 }
 
@@ -218,19 +267,21 @@ pub fn bar_sizes(bars: &[(usize, u64)]) -> String {
 /// How the screen names a display adapter: its maker, PCI address and
 /// device ID.
 pub fn adapter(adapter: &Adapter) -> String {
-    let maker = match adapter.vendor {
+    format!(
+        "the {} display adapter at {} (device {:04x})",
+        maker(adapter.vendor),
+        adapter.address,
+        adapter.device
+    )
+}
+
+fn maker(vendor: Vendor) -> String {
+    match vendor {
         Vendor::Nvidia => String::from("NVIDIA"),
-        Vendor::Amd => match adapter.amd_chip() {
-            Some(chip) => format!("AMD {} ({})", chip.die, chip.products),
-            None => String::from("AMD"),
-        },
+        Vendor::Amd => String::from("AMD"),
         Vendor::Intel => String::from("Intel"),
         Vendor::Other(id) => format!("PCI vendor {id:04x}"),
-    };
-    format!(
-        "the {maker} display adapter at {} (device {:04x})",
-        adapter.address, adapter.device
-    )
+    }
 }
 
 /// The line for a display adapter Stela's GPU driver does not run, and why.
@@ -264,11 +315,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_gpu_of_another_maker_is_named_by_its_maker() {
+        assert_eq!(
+            refused(Vendor::Intel, "00:02.0", 0x9a49, Reason::Other, ""),
+            "the Intel GPU at 00:02.0 (device 9a49) did not start; the boot log on this USB \
+             says why"
+        );
+        let missing = refused(
+            Vendor::Intel,
+            "00:02.0",
+            0x9a49,
+            Reason::MissingFirmware,
+            "",
+        );
+        assert!(
+            missing.starts_with("the USB has no firmware for the Intel GPU at 00:02.0"),
+            "{missing}"
+        );
+        assert!(missing.ends_with("run `stela repair`"), "{missing}");
+        let named = refused(Vendor::Intel, "00:02.0", 0x9a49, Reason::Other, "no reset");
+        assert!(
+            named.contains("did not start: no reset. The boot log"),
+            "{named}"
+        );
+    }
+
+    #[test]
+    fn an_unbound_gpu_says_when_its_screen_stays_dark() {
+        assert_eq!(
+            unbound("00:02.0", "xe", false),
+            "the GPU at 00:02.0 did not start: its Linux driver xe did not bind it. The boot \
+             log on this USB says why"
+        );
+        let dark = unbound("00:02.0", "xe", true);
+        assert!(
+            dark.contains("xe did not bind it. The screen the PC started on is wired to it"),
+            "{dark}"
+        );
+    }
+
+    #[test]
     fn a_refused_gpu_is_named_with_its_fix() {
-        let missing = refused("01:00.0", 0x2484, Reason::MissingFirmware, "");
+        let missing = refused(
+            Vendor::Nvidia,
+            "01:00.0",
+            0x2484,
+            Reason::MissingFirmware,
+            "",
+        );
         assert!(missing.contains("NVIDIA ga104 GPU"), "{missing}");
         assert!(missing.ends_with("run `stela repair`"), "{missing}");
-        let other = refused("03:00.0", 0x2b85, Reason::Other, "");
+        let other = refused(Vendor::Nvidia, "03:00.0", 0x2b85, Reason::Other, "");
         assert_eq!(
             other,
             "the NVIDIA gb202 GPU at 03:00.0 did not start; the boot log on this USB says why"
@@ -276,6 +373,7 @@ mod tests {
         // The refusal's words reach the screen, which is often all a report
         // brings.
         let named = refused(
+            Vendor::Nvidia,
             "01:00.0",
             0x28a0,
             Reason::Other,
@@ -291,7 +389,13 @@ mod tests {
     #[test]
     fn an_older_gpu_or_none_names_what_is_supported() {
         // A GeForce GTX 1080 (Pascal, gp104).
-        let pascal = refused("01:00.0", 0x1b80, Reason::MissingFirmware, "");
+        let pascal = refused(
+            Vendor::Nvidia,
+            "01:00.0",
+            0x1b80,
+            Reason::MissingFirmware,
+            "",
+        );
         assert_eq!(
             pascal,
             "the NVIDIA GPU at 01:00.0 (device 1b80) is not supported: Stela needs an NVIDIA \
@@ -328,13 +432,6 @@ mod tests {
              ported to Stela"
         );
         assert!(adapter(&at(1, Vendor::Other(0x1af4), 0x1050)).contains("PCI vendor 1af4"));
-        let navi48 = at(3, Vendor::Amd, 0x7550);
-        assert_eq!(
-            unused(&navi48),
-            "the AMD Navi 48 (Radeon RX 9070 series) display adapter at 0000:03:00.0 (device \
-             7550) is not used: this RDNA 4 Radeon is recognized, but amdgpu and RADV are not \
-             ported to Stela yet"
-        );
     }
 
     #[test]
@@ -440,5 +537,10 @@ mod tests {
              exceeded its deadline. macOS starts without it; the boot log on this USB says why"
         );
         assert!(failed(&[], "x").starts_with("the NVIDIA GPU could not start: x."));
+        // Without an NVIDIA GPU, the adapters a driver was started for.
+        assert!(
+            failed(&found[..1], "x")
+                .starts_with("the Intel GPU at 0000:00:00.0 (device a780) could not start: x."),
+        );
     }
 }

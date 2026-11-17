@@ -130,12 +130,6 @@ pub(super) fn write_volume(
             fs::write(&paths.source, bytes)?;
         }
         fs::write(volume.join("EFI/stela/stela.cfg"), options)?;
-        // AMD fork: a directory tree added to the volume as it is, such as
-        // the amdgpu firmware bundle a GPU trial gives the boot
-        // (`xtask/scripts/amd-firmware-bundle.py`).
-        if let Some(extra) = std::env::var_os("STELA_BOOT_VOLUME_EXTRA") {
-            copy_tree(Path::new(&extra), volume)?;
-        }
         if let Some(directory) = &arguments.host_firmware {
             let package =
                 stela_loader::host_firmware::Package::read_for_mount(directory, &fs::read(image)?)?;
@@ -395,19 +389,4 @@ mod tests {
             );
         }
     }
-}
-
-/// AMD fork: copy every file below `from` to the same path below `to`.
-fn copy_tree(from: &Path, to: &Path) -> Result<()> {
-    for entry in fs::read_dir(from).with_context(|| format!("{}", from.display()))? {
-        let entry = entry?;
-        let target = to.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            fs::create_dir_all(&target)?;
-            copy_tree(&entry.path(), &target)?;
-        } else {
-            fs::copy(entry.path(), &target)?;
-        }
-    }
-    Ok(())
 }

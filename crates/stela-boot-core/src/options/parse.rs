@@ -75,6 +75,16 @@ impl ParseState<'_> {
                 }
                 options.guest_pes = Some(count);
             }
+            DISPLAY_SIZE => {
+                let size = value().ok_or(Error::DisplaySize)?;
+                let (width, height) = size.split_once('x').ok_or(Error::DisplaySize)?;
+                let width = width.parse::<u32>().map_err(|_| Error::DisplaySize)?;
+                let height = height.parse::<u32>().map_err(|_| Error::DisplaySize)?;
+                if width == 0 || height == 0 {
+                    return Err(Error::DisplaySize);
+                }
+                options.display_size = Some((width, height));
+            }
             "--restore-study" => options.restore = true,
             "--restore-source" => {
                 let target = value()
@@ -127,7 +137,6 @@ impl ParseState<'_> {
                 options.bundle_directory = Some(String::from(directory));
             }
             "--survey" => options.survey = true,
-            "--gpu-trial" => options.gpu_trial = true,
             VERIFY_ON_READ => options.verify_on_read = true,
             UPDATE_RESTORE => options.update_restore = true,
             "--development-restore" => options.development_restore = true,

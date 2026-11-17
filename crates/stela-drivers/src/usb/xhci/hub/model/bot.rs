@@ -28,6 +28,9 @@ pub(super) struct Disk {
     pub(super) wedged: bool,
     /// The hung peer acknowledges a class reset and stays hung.
     pub(super) acks_reset: bool,
+    /// Its link is broken: every bulk TD ends with a USB transaction error
+    /// and the class reset fails with one, until a port reset readdresses it.
+    pub(super) broken: bool,
     /// A READ that covers this block fails with MEDIUM ERROR, as a worn
     /// stick's unreadable block does.
     pub(super) unreadable: Option<usize>,
@@ -45,6 +48,7 @@ impl Disk {
             commands: Vec::new(),
             wedged: false,
             acks_reset: false,
+            broken: false,
             unreadable: None,
             failing: false,
             sense: None,

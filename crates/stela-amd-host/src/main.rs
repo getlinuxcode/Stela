@@ -18,18 +18,22 @@
 //! `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json`.
 //!
 //! [`survey`]: stela_driver_gpu::metal::native::survey
-//! [`metal::amd`]: stela_driver_gpu::metal::amd
+//! [`metal::amd`]: crate::admission
+use admission::{HOST_AMD, core_from_name};
+use chip::{Chip, GcVersion};
 use std::process::ExitCode;
 use stela_driver_gpu::metal::{
-    amd::{self, Attachment, Chip, GcVersion, open::Gpu},
     capabilities::{ApiFeatures, Capabilities, ShaderFeatures},
     native::{
         Loader,
         survey::{self, Outcome, Probed, Surveyed},
     },
+    open::{Attachment, Gpu},
     vulkan::{MemoryHeapFlags, MemoryProperties},
 };
 
+mod admission;
+mod chip;
 #[cfg(feature = "radv-host")]
 mod device;
 #[cfg(feature = "radv-host")]
@@ -79,6 +83,7 @@ fn main() -> ExitCode {
         log,
         submit_thread: None,
         refusals: None,
+        keep_lost: false,
         relax,
     };
     // SAFETY: the entry point is the loaded loader's, which outlives the
@@ -206,7 +211,7 @@ fn report(device: &Surveyed) -> Option<Gpu> {
     );
     memory(probed);
     let usable = requirements(probed);
-    if device.vendor_id != amd::VENDOR_ID {
+    if device.vendor_id != admission::VENDOR_ID {
         println!("  not an AMD GPU: the AMD route does not apply");
         return None;
     }
@@ -227,11 +232,12 @@ fn report(device: &Surveyed) -> Option<Gpu> {
         location_number: 0,
     };
     let gpu = Gpu {
+        stack: &HOST_AMD,
         pci,
-        gc,
+        chip: admission::encode(gc),
         attachment,
     };
-    let chip = match Chip::admit(identity, gpu.gc) {
+    let chip = match Chip::admit(identity, gc) {
         Ok(chip) => chip,
         Err(refusal) => {
             println!("  admission: refused, {refusal:?}");
@@ -331,15 +337,6 @@ fn capabilities(probed: &Probed, chip: &Chip, attachment: Attachment) {
             println!("    - {} ({:?})", gap.capability, gap.cause);
         }
     }
-}
-
-/// The graphics core RADV names a device by, e.g. "(RADV GFX1201)", for
-/// hosts whose kernel publishes no IP discovery table.
-fn core_from_name(name: &str) -> Option<GcVersion> {
-    amd::CHIPS
-        .iter()
-        .find(|chip| name.contains(&format!("RADV {}", chip.name)))
-        .map(|chip| chip.gc)
 }
 
 #[cfg(test)]
