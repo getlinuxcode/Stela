@@ -3,3 +3,8 @@
 /*.h
 /include/drm/
 /amdgpu/*.h
+# AMD fork (J7): libdrm_amdgpu's sources, which RADV's winsys calls
+# (`xtask/src/gpu/radv.rs` compiles them for the image).
+/amdgpu/*.c
+/amdgpu/meson.build
+/amdgpu/amdgpu-symbols.txt

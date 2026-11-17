@@ -109,16 +109,6 @@ const SKIPPED: [&str; 11] = [
     "u_debug_stack",
     "wsi_common_display",
 ];
-/// Stela's stand-ins, under `compat/mesa`, built with an NVK unit's flags.
-const STAND_INS: [&str; 7] = [
-    "nvkcl",
-    "build_id",
-    "nv_cubin",
-    "drm",
-    "soft_float",
-    "nir_options",
-    "submit_thread",
-];
 /// The Metal compiler service, under `compiler`, built with an NVK unit's flags.
 const AIR: [&str; 16] = [
     "air_call",
@@ -139,6 +129,57 @@ const AIR: [&str; 16] = [
     "threadgroup",
 ];
 const MODEL_UNIT: &str = "nvk_query_pool.c";
+
+/// AMD fork (J7): what one Vulkan driver's build takes from this pipeline, so
+/// RADV (`radv.rs`) is built the way NVK is. Everything else here is shared.
+pub(super) struct Flavor {
+    /// The build directory's name, under `target/gpu`.
+    pub(super) name: &'static str,
+    /// The Meson options in place of `-Dvulkan-drivers=nouveau`.
+    pub(super) options: &'static [&'static str],
+    pub(super) drivers: &'static [&'static str],
+    pub(super) whole_libraries: &'static [&'static str],
+    pub(super) skipped: &'static [&'static str],
+    /// Stand-ins, by path under the GPU crate's `src`, without `.c`.
+    pub(super) stand_ins: &'static [&'static str],
+    pub(super) model_unit: &'static str,
+    /// Whether Mesa's Rust is built (NAK, NIL), with its bindings checked.
+    pub(super) rust: bool,
+    /// Whether a `libelf.pc` is written: RADV builds its ELF path only with
+    /// one, and needs it only with LLVM.
+    pub(super) libelf: bool,
+    /// libdrm_amdgpu's sources, under `third_party/libdrm`, compiled as
+    /// units and offered to Meson as `libdrm_amdgpu`.
+    pub(super) libdrm_amdgpu: &'static [&'static str],
+    /// The archives: the members linked whole, then the rest.
+    pub(super) archives: [&'static str; 2],
+    /// Defines Meson's probes of the build host add that the image's units
+    /// drop (RADV's `USE_LIBELF`, when the host has a libelf).
+    pub(super) dropped_defines: &'static [&'static str],
+}
+
+pub(super) const NVK: Flavor = Flavor {
+    name: "nvk",
+    options: &["-Dvulkan-drivers=nouveau"],
+    drivers: &DRIVERS,
+    whole_libraries: &WHOLE_LIBRARIES,
+    skipped: &SKIPPED,
+    stand_ins: &[
+        "compat/mesa/nvkcl",
+        "compat/mesa/build_id",
+        "compat/mesa/nv_cubin",
+        "compat/mesa/drm",
+        "compat/mesa/soft_float",
+        "compat/mesa/nir_options",
+        "compat/mesa/submit_thread",
+    ],
+    model_unit: MODEL_UNIT,
+    rust: true,
+    libelf: true,
+    libdrm_amdgpu: &[],
+    archives: ["libstela-vulkan.a", "libstela-nvk.a"],
+    dropped_defines: &[],
+};
 /// The C library, under `compat/libc`.
 pub(super) const LIBC: [&str; 6] = ["libc", "stdio", "pthread", "math", "system", "wchar"];
 /// Original LLVM units behind `compat/libc/regex.h`, also present in the
@@ -265,6 +306,7 @@ fn paths(directory: &Path) -> Result<(PathBuf, PathBuf)> {
 }
 
 fn setup(
+    flavor: &Flavor,
     toolchain: &Toolchain,
     sysroot: &Sysroot,
     directory: &Path,
@@ -307,10 +349,23 @@ fn setup(
             slashed(&libdrm)
         ),
     )?;
-    fs::write(
-        packages.join("libelf.pc"),
-        format!("Name: libelf\nDescription: unused\nVersion: {LIBELF_VERSION}\nCflags:\n"),
-    )?;
+    if flavor.libelf {
+        fs::write(
+            packages.join("libelf.pc"),
+            format!("Name: libelf\nDescription: unused\nVersion: {LIBELF_VERSION}\nCflags:\n"),
+        )?;
+    }
+    if !flavor.libdrm_amdgpu.is_empty() {
+        // Its sources are compiled as units ([`units`]); Meson sees headers.
+        fs::write(
+            packages.join("libdrm_amdgpu.pc"),
+            format!(
+                "Name: libdrm_amdgpu\nDescription: compiled as units\nVersion: {LIBDRM_VERSION}\n\
+                 Requires: libdrm\nCflags: -I{}/amdgpu\n",
+                slashed(&libdrm)
+            ),
+        )?;
+    }
     let mut setup = Command::new(tool("meson", GENERATORS)?);
     setup
         .arg("setup")
@@ -318,7 +373,12 @@ fn setup(
         .arg(third_party("mesa"))
         .arg("--cross-file")
         .arg(machine)
-        .args(OPTIONS)
+        .args(
+            OPTIONS
+                .iter()
+                .filter(|option| !option.starts_with("-Dvulkan-drivers="))
+                .chain(flavor.options),
+        )
         .env("PATH", path);
     // Rust on Windows does not link through the C compiler Meson finds.
     if cfg!(windows) {
@@ -582,6 +642,7 @@ fn object_name(output: &str) -> String {
 
 /// The units the drivers link, with Stela's stand-ins and C library.
 fn units(
+    flavor: &Flavor,
     build: &Path,
     objects: &Path,
     ninja: &Path,
@@ -592,7 +653,7 @@ fn units(
     let linked = capture(
         Command::new(ninja)
             .args(["-t", "inputs"])
-            .args(DRIVERS)
+            .args(flavor.drivers)
             .current_dir(build)
             .env("PATH", path),
     )?;
@@ -608,7 +669,11 @@ fn units(
     // A source two libraries compile is the one's that is linked whole.
     let whole: BTreeSet<&str> = entries
         .iter()
-        .filter(|entry| entry["output"].as_str().is_some_and(linked_whole))
+        .filter(|entry| {
+            entry["output"]
+                .as_str()
+                .is_some_and(|output| linked_whole(flavor, output))
+        })
         .filter_map(|entry| entry["file"].as_str())
         .collect();
     for entry in entries {
@@ -619,14 +684,17 @@ fn units(
             continue;
         };
         let output = &words[at + 1];
-        if !linked.contains(output.as_str()) || (whole.contains(file) && !linked_whole(output)) {
+        if !linked.contains(output.as_str())
+            || (whole.contains(file) && !linked_whole(flavor, output))
+        {
             continue;
         }
-        if file.ends_with(MODEL_UNIT) {
+        if file.ends_with(flavor.model_unit) {
             model = Some((file.to_owned(), words.clone()));
         }
         if file.ends_with(".S")
-            || SKIPPED
+            || flavor
+                .skipped
                 .iter()
                 .any(|skip| output.contains(skip) || file.contains(skip))
         {
@@ -638,6 +706,10 @@ fn units(
             "{file} is neither C nor C++"
         );
         let mut arguments = retarget(&words, if is_cxx { cxx } else { common });
+        arguments.retain(|word| {
+            word.strip_prefix("-D")
+                .is_none_or(|define| !flavor.dropped_defines.contains(&define))
+        });
         if file.ends_with("rust/bindings.c") {
             arguments.extend(
                 FLOAT_WRAPPERS
@@ -678,9 +750,25 @@ fn units(
     };
     let model_unit =
         |source: &Path, name: &str, added: &[String]| like(&file, &words, source, name, added);
-    for name in STAND_INS {
-        let source = compat.join("mesa").join(format!("{name}.c"));
+    for stand_in in flavor.stand_ins {
+        let source = gpu().join(format!("{stand_in}.c"));
+        let name = stand_in.rsplit('/').next().unwrap_or(stand_in);
         units.push(model_unit(&source, name, &[]));
+    }
+    let libdrm = third_party("libdrm");
+    let libdrm_flags = [
+        format!("-I{}", libdrm.display()),
+        format!("-I{}/amdgpu", libdrm.display()),
+        format!("-I{}/include/drm", libdrm.display()),
+        // No table file: amdgpu names a GPU by its device ID alone.
+        "-DAMDGPU_ASIC_ID_TABLE=\"/usr/share/libdrm/amdgpu.ids\"".to_owned(),
+        "-DHAVE_VISIBILITY=1".to_owned(),
+        // The compiler's atomic builtins, as libdrm's Meson finds them.
+        "-DHAVE_LIBDRM_ATOMIC_PRIMITIVES=1".to_owned(),
+    ];
+    for source in flavor.libdrm_amdgpu {
+        let name = format!("libdrm_{}", source.replace(['/', '.'], "_"));
+        units.push(model_unit(&libdrm.join(source), &name, &libdrm_flags));
     }
     let compiler = gpu().join("compiler");
     let added = [
@@ -810,25 +898,35 @@ pub(super) fn gather_constructors(units: &[Unit]) -> Result<()> {
 
 /// Whether Meson links `unit`'s library whole: its entry points are reached
 /// only by weak reference, which pulls no member from an archive.
-fn linked_whole(object: &str) -> bool {
+fn linked_whole(flavor: &Flavor, object: &str) -> bool {
     let name = object_name(object);
-    WHOLE_LIBRARIES.iter().any(|library| name.contains(library))
+    flavor
+        .whole_libraries
+        .iter()
+        .any(|library| name.contains(library))
 }
 
 pub fn build(jobs: u16) -> Result<()> {
+    build_flavor(&NVK, jobs)
+}
+
+/// [`build`] for one driver's [`Flavor`].
+pub(super) fn build_flavor(flavor: &Flavor, jobs: u16) -> Result<()> {
     let toolchain = super::toolchain::discover()?;
-    let directory = build_directory("nvk");
+    let directory = build_directory(flavor.name);
     let build = directory.join("build");
     let (_, path) = paths(&directory)?;
     fs::create_dir_all(&directory)?;
     super::llvm::build(&toolchain, jobs, false)?;
     let sysroot = Sysroot::build(&toolchain, &directory, jobs)?;
-    setup(&toolchain, &sysroot, &directory, &build, &path)?;
+    setup(flavor, &toolchain, &sysroot, &directory, &build, &path)?;
     generate(&sysroot, &build, &path, &toolchain.libclang)?;
     let libc = gpu().join("compat/libc");
     let includes = include_flags(&toolchain.clang, &libc)?;
-    bindings(&build, &path, &includes, &toolchain.libclang)?;
-    check_float_crossings(&build)?;
+    if flavor.rust {
+        bindings(&build, &path, &includes, &toolchain.libclang)?;
+        check_float_crossings(&build)?;
+    }
 
     let objects = directory.join("objects");
     fs::create_dir_all(&objects)?;
@@ -838,12 +936,13 @@ pub fn build(jobs: u16) -> Result<()> {
     common.push(format!("-I{}", gpu().join("compat/mesa").display()));
     let ninja = tool("ninja", GENERATORS)?;
     let cxx = super::llvm::cxx_flags(&common);
-    let units = units(&build, &objects, &ninja, &path, &common, &cxx)?;
+    let units = units(flavor, &build, &objects, &ninja, &path, &common, &cxx)?;
     compile(&toolchain.clang, &build, &units, jobs)?;
 
     gather_constructors(&units)?;
     let (whole, lazy): (Vec<_>, Vec<_>) = units.iter().partition(|unit| {
         linked_whole(
+            flavor,
             &unit
                 .output
                 .file_name()
@@ -851,8 +950,8 @@ pub fn build(jobs: u16) -> Result<()> {
                 .to_string_lossy(),
         )
     });
-    let archive = directory.join("libstela-nvk.a");
-    for (name, members) in [("libstela-vulkan.a", &whole), ("libstela-nvk.a", &lazy)] {
+    let archive = directory.join(flavor.archives[1]);
+    for (name, members) in [(flavor.archives[0], &whole), (flavor.archives[1], &lazy)] {
         let archive = directory.join(name);
         if archive.is_file() {
             fs::remove_file(&archive)?;

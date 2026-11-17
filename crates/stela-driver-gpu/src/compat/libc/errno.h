@@ -33,6 +33,8 @@ int *__errno_location(void);
 #define EOPNOTSUPP 95
 #define ENOTSUP EOPNOTSUPP
 #define ETIME 62
+/* AMD fork (J7): RADV's winsys. */
+#define ENODATA 61
 #define ETIMEDOUT 110
 #define ECANCELED 125
 __END_DECLS
