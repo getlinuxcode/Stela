@@ -3102,6 +3102,18 @@ fn start_devices(
                 Ok(work) if options.gpu_trial && !options.boots_macos() => {
                     let started = open_gpus(work, mmio, remappers, handoff, host_firmware, gpus);
                     output::arguments(format_args!("GPU TRIAL started={started}\n"));
+                    // The console moves to the Radeon's screen, and stays
+                    // there long enough for a person at the monitor to read.
+                    #[cfg(feature = "amdgpu")]
+                    if let Some(screen) = gpu::amd_screen() {
+                        crate::status::take_screen(Some(screen));
+                        crate::status::info("Stela's console on the Radeon's screen (GPU trial)");
+                        output::arguments(format_args!("GPU TRIAL console on the Radeon\n"));
+                        let end = host::rdtsc().saturating_add(handoff.tsc_hz.saturating_mul(15));
+                        while host::rdtsc() < end {
+                            core::hint::spin_loop();
+                        }
+                    }
                     output::flush_log();
                     (Ok(work), Vec::new())
                 }

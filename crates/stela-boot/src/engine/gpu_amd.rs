@@ -396,3 +396,39 @@ pub(super) unsafe fn trial() {
     let checked = unsafe { stela_amdgpu_trial() };
     output::arguments(format_args!("GPU TRIAL checked {checked} Radeon(s)\n"));
 }
+
+/// `struct stela_amdgpu_screen` (`src/amd/linux/trial.c`).
+#[repr(C)]
+struct Screen {
+    pixels: *mut c_void,
+    width: u32,
+    height: u32,
+    pitch: u32,
+    refresh_millihertz: u32,
+}
+
+/// The screen [`trial`] lit on a Radeon's connected outputs, for Stela's
+/// console: a linear XRGB8888 buffer of VRAM, mapped in the host's page
+/// window, which every processor sees.
+pub(in crate::engine) fn screen() -> Option<crate::console::Framebuffer> {
+    unsafe extern "C" {
+        fn stela_amdgpu_screen(screen: *mut Screen) -> bool;
+    }
+    let mut screen = Screen {
+        pixels: ptr::null_mut(),
+        width: 0,
+        height: 0,
+        pitch: 0,
+        refresh_millihertz: 0,
+    };
+    // SAFETY: the C side only copies what its trial recorded.
+    if !unsafe { stela_amdgpu_screen(&raw mut screen) } || screen.pixels.is_null() {
+        return None;
+    }
+    Some(crate::console::Framebuffer::linear(
+        screen.pixels as usize,
+        screen.width as usize,
+        screen.height as usize,
+        screen.pitch as usize / size_of::<u32>(),
+    ))
+}

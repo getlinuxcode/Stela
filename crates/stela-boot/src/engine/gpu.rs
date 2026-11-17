@@ -88,6 +88,8 @@ use stela_linux::{
 #[cfg(feature = "amdgpu")]
 #[path = "gpu_amd.rs"]
 mod amd;
+#[cfg(feature = "amdgpu")]
+pub(super) use amd::screen as amd_screen;
 
 type Environment = LinuxEnvironment<SLOTS>;
 type LinuxKernel = KernelOwner<Host, SLOTS>;

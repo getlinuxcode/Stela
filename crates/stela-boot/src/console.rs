@@ -215,7 +215,8 @@ impl Framebuffer {
     }
 
     /// A blue-low `width` by `height` screen at `base`, `stride` pixels a row.
-    #[cfg(feature = "nvk")]
+    /// AMD fork: a Radeon's screen too (`engine/gpu_amd.rs`).
+    #[cfg(any(feature = "nvk", feature = "amdgpu"))]
     pub fn linear(base: usize, width: usize, height: usize, stride: usize) -> Self {
         Self {
             base,
