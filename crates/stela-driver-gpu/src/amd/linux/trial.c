@@ -20,6 +20,7 @@
 #include <drm/drm_fourcc.h>
 #include <drm/drm_modes.h>
 #include <linux/delay.h>
+#include <linux/dma-resv.h>
 #include <linux/dma-fence.h>
 #include <linux/iosys-map.h>
 
@@ -208,7 +209,22 @@ static void display(struct amdgpu_device *adev)
 		dev_err(adev->dev, "stela trial: buffer not mapped (%d)\n", r);
 		goto delete;
 	}
+	/*
+	 * amdgpu clears a new VRAM buffer with SDMA, a job that may still run:
+	 * bars drawn before it ends are cleared away (the previous trial read
+	 * black back). Wait for every fence on the buffer first.
+	 */
+	{
+		long waited = dma_resv_wait_timeout(buffer->fb->obj[0]->resv,
+						    DMA_RESV_USAGE_BOOKKEEP, false,
+						    msecs_to_jiffies(2000));
+
+		dev_info(adev->dev, "stela trial: buffer idle before drawing: %s\n",
+			 waited > 0 ? "yes" : waited == 0 ? "timed out" : "error");
+	}
 	bars(&map, width, height, buffer->fb->pitches[0]);
+	dev_info(adev->dev, "stela trial: drawn, pixel (%u, 0) reads 0x%06x\n", width / 16,
+		 iosys_map_rd(&map, (size_t)(width / 16) * 4, u32) & 0xffffff);
 	mutex_lock(&client.modeset_mutex);
 	drm_client_for_each_modeset(modeset, &client) {
 		if (!modeset->mode)
