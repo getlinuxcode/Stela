@@ -24,6 +24,8 @@
 #include <linux/iosys-map.h>
 
 #include "amdgpu.h"
+#include "amdgpu_dm.h"
+#include "dc.h"
 #include "nvd.h"
 
 #define DISPLAY_SECONDS 20
@@ -96,6 +98,55 @@ static void command(struct amdgpu_device *adev)
 				 ktime_us_delta(ktime_get(), start));
 	}
 	amdgpu_bo_free_kernel(&bo, &gpu_addr, &cpu);
+}
+
+/*
+ * What the display reached: pixels read back through the CPU's mapping of
+ * VRAM (the BAR), each lit CRTC's hardware frame counter over a second, and
+ * each lit DisplayPort link's trained lanes and rate. A dark monitor with a
+ * successful commit is one of: pixels not in VRAM, a timing generator not
+ * running, or a link the sink did not train.
+ */
+static void observe(struct amdgpu_device *adev, struct drm_client_dev *client,
+		    struct iosys_map *map, unsigned int width, unsigned int height,
+		    unsigned int pitch)
+{
+	static const unsigned int probes[][2] = {{0, 0}, {1, 1}, {4, 2}, {7, 3}};
+	struct drm_mode_set *modeset;
+
+	for (unsigned int i = 0; i < ARRAY_SIZE(probes); i++) {
+		unsigned int x = (2 * probes[i][0] + 1) * width / 16, y = probes[i][1] * height / 4;
+		u32 pixel = iosys_map_rd(map, (size_t)y * pitch + x * 4, u32);
+
+		dev_info(adev->dev, "stela trial: pixel (%u, %u) reads 0x%06x\n", x, y,
+			 pixel & 0xffffff);
+	}
+	mutex_lock(&client->modeset_mutex);
+	drm_client_for_each_modeset(modeset, client) {
+		struct drm_crtc *crtc = modeset->crtc;
+		u32 before, after;
+
+		if (!modeset->mode)
+			continue;
+		if (crtc->funcs->get_vblank_counter) {
+			before = crtc->funcs->get_vblank_counter(crtc);
+			msleep(1000);
+			after = crtc->funcs->get_vblank_counter(crtc);
+			dev_info(adev->dev, "stela trial: CRTC %u counted %u frames in 1 s\n",
+				 crtc->index, after - before);
+		}
+		for (unsigned int c = 0; c < modeset->num_connectors; c++) {
+			struct drm_connector *connector = modeset->connectors[c];
+			struct dc_link *link = to_amdgpu_dm_connector(connector)->dc_link;
+
+			if (link)
+				dev_info(adev->dev,
+					 "stela trial: %s link: %u lanes at rate 0x%x, connection type %u\n",
+					 connector->name, link->cur_link_settings.lane_count,
+					 link->cur_link_settings.link_rate, link->type);
+		}
+	}
+	mutex_unlock(&client->modeset_mutex);
 }
 
 /* Eight vertical colour bars, as a test card's. */
@@ -172,9 +223,11 @@ static void display(struct amdgpu_device *adev)
 	if (r) {
 		dev_err(adev->dev, "stela trial: mode set failed (%d)\n", r);
 	} else {
+		drm_client_buffer_flush(buffer, NULL);
 		dev_info(adev->dev,
 			 "stela trial: %u output(s) lit through DCN with colour bars, %ux%u, for %u s\n",
 			 lit, width, height, DISPLAY_SECONDS);
+		observe(adev, &client, &map, width, height, buffer->fb->pitches[0]);
 		msleep(DISPLAY_SECONDS * 1000);
 	}
 	drm_client_buffer_vunmap(buffer);
