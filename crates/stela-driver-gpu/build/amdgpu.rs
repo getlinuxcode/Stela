@@ -29,10 +29,11 @@ const KBUILD: &str = "build/amdgpu-kbuild.json";
 const AMD_LINUX: &str = "src/amd/linux";
 const LINUX: &str = "../../third_party/linux";
 /// The fork's own kernel services for amdgpu (`src/amd/linux`).
-const SERVICES: [&str; 3] = [
+const SERVICES: [&str; 4] = [
     "src/amd/linux/services",
     "src/amd/linux/pci",
     "src/amd/linux/scan",
+    "src/amd/linux/trial",
 ];
 /// What amdgpu selects that nouveau's port does not compile (Kconfig's
 /// DRM_BUDDY, DRM_SUBALLOC_HELPER, DRM_CLIENT, DRM_DISPLAY_DSC_HELPER,

@@ -381,3 +381,18 @@ pub(super) unsafe fn start(claimed: &[Claimed]) -> Result<(), Errno> {
         unsafe { gpu::nouveau::start() }
     }
 }
+
+/// Stela's own checks on each Radeon amdgpu bound (`src/amd/linux/trial.c`
+/// in `stela-driver-gpu`): the GPU runs a command Stela submits, and the
+/// connected outputs show colour bars through DCN for a while.
+///
+/// # Safety
+/// Entered in the Linux owner, on the task that probed the GPUs.
+pub(super) unsafe fn trial() {
+    unsafe extern "C" {
+        fn stela_amdgpu_trial() -> core::ffi::c_int;
+    }
+    // SAFETY: the caller's contract; the checks may sleep.
+    let checked = unsafe { stela_amdgpu_trial() };
+    output::arguments(format_args!("GPU TRIAL checked {checked} Radeon(s)\n"));
+}

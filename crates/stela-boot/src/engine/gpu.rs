@@ -1705,6 +1705,12 @@ fn start(kernel: &LinuxKernel, claimed: Vec<Claimed>) -> Started {
             )),
         }
     }
+    // AMD fork (J6): Stela's own checks on each Radeon amdgpu bound.
+    #[cfg(feature = "amdgpu")]
+    if !job._attached.is_empty() {
+        // SAFETY: entered, on the task that probed the GPUs.
+        unsafe { amd::trial() };
+    }
     job
 }
 
