@@ -42,6 +42,18 @@ sudo systemd-run --unit=stela-amd-gpu --collect \
 
 Le dernier essai écrit `.stela/vm/gpu-trial/report.txt` : les lignes GPU du journal série, et l'état de la carte avant et après.
 
+## Essais en VM avec la carte (17 novembre 2026)
+
+Sept essais, chacun allant plus loin (`.stela/vm/gpu-trial/`) :
+
+1. IP discovery et VBIOS lus, arrêt au premier firmware (catalogue vide).
+2. 20 firmwares épinglés et fournis : `early_init` complet, arrêt sur le masque DMA de 44 bits (corrigé dans `gpu_amd.rs`).
+3. `sw_init` du GMC passé (16 Go de GDDR6, GART de 512 Mo), arrêt sur les quirks I2C du bus du SMU. Ils sont maintenant vérifiés par l'environnement, comme le fait Linux.
+4. Initialisation complète : PSP, SMU, DCN 4.0.1, MES, GFX (64 CU), SDMA, VCN, puis `[drm] Initialized amdgpu 3.64.0` en 2 s.
+5. Stela fait exécuter au GPU des WRITE_DATA PM4 sur les files graphique (≈ 165 µs) et de calcul (≈ 225 µs). L'écran (DP-3, 3440×1440 à 100 Hz) reste noir.
+6. Mesures : lien DP établi (4 voies en HBR2), 102 images par seconde, pixels relus noirs. C'est l'effacement asynchrone du buffer par SDMA qui passait après le dessin.
+7. Stela attend les fences du buffer avant de dessiner, et les barres de couleur s'affichent sur l'écran.
+
 ## Suite
 
 1. Premier essai en VM avec la carte prêtée : voir jusqu'où amdgpu va (passage à froid, IP discovery, puis l'échec attendu au premier firmware demandé).
