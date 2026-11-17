@@ -59,10 +59,6 @@ int i2c_add_adapter(struct i2c_adapter *adapter)
 		return -EINVAL;
 	if (WARN(!adapter->algo, "adapter '%s': no algo supplied\n", adapter->name))
 		return -EINVAL;
-	if (adapter->quirks) {
-		stela_linux_unsupported("I2C adapter quirks");
-		return -EOPNOTSUPP;
-	}
 	if (!adapter->lock_ops)
 		adapter->lock_ops = &bus_lock_ops;
 	rt_mutex_init(&adapter->bus_lock);
@@ -82,6 +78,62 @@ void i2c_del_adapter(struct i2c_adapter *adapter)
 	wait_for_completion(&adapter->dev_released);
 }
 
+static bool quirk_exceeded(int value, int max)
+{
+	return max && value > max;
+}
+
+static int quirk_error(struct i2c_adapter *adapter, const struct i2c_msg *msg, const char *why)
+{
+	dev_err_ratelimited(&adapter->dev, "adapter quirk: %s (addr 0x%04x, size %u, %s)\n", why,
+			    msg->addr, msg->len, msg->flags & I2C_M_RD ? "read" : "write");
+	return -EOPNOTSUPP;
+}
+
+/* The messages an adapter's controller cannot carry, as Linux's
+ * i2c_check_for_quirks refuses them before the transfer. */
+static int check_quirks(struct i2c_adapter *adapter, struct i2c_msg *msgs, int num)
+{
+	const struct i2c_adapter_quirks *q = adapter->quirks;
+	int max_num = q->max_num_msgs;
+	bool check_lengths = true;
+
+	if (q->flags & I2C_AQ_COMB) {
+		max_num = 2;
+		if (num == 2) {
+			if (q->flags & I2C_AQ_COMB_WRITE_FIRST && msgs[0].flags & I2C_M_RD)
+				return quirk_error(adapter, &msgs[0], "1st comb msg must be write");
+			if (q->flags & I2C_AQ_COMB_READ_SECOND && !(msgs[1].flags & I2C_M_RD))
+				return quirk_error(adapter, &msgs[1], "2nd comb msg must be read");
+			if (q->flags & I2C_AQ_COMB_SAME_ADDR && msgs[0].addr != msgs[1].addr)
+				return quirk_error(adapter, &msgs[0], "comb msg only to same addr");
+			if (quirk_exceeded(msgs[0].len, q->max_comb_1st_msg_len))
+				return quirk_error(adapter, &msgs[0], "msg too long");
+			if (quirk_exceeded(msgs[1].len, q->max_comb_2nd_msg_len))
+				return quirk_error(adapter, &msgs[1], "msg too long");
+			check_lengths = false;
+		}
+	}
+	if (quirk_exceeded(num, max_num))
+		return quirk_error(adapter, &msgs[0], "too many messages");
+	for (int i = 0; i < num; i++) {
+		u16 len = msgs[i].len;
+
+		if (msgs[i].flags & I2C_M_RD) {
+			if (check_lengths && quirk_exceeded(len, q->max_read_len))
+				return quirk_error(adapter, &msgs[i], "msg too long");
+			if (q->flags & I2C_AQ_NO_ZERO_LEN_READ && len == 0)
+				return quirk_error(adapter, &msgs[i], "no zero length");
+		} else {
+			if (check_lengths && quirk_exceeded(len, q->max_write_len))
+				return quirk_error(adapter, &msgs[i], "msg too long");
+			if (q->flags & I2C_AQ_NO_ZERO_LEN_WRITE && len == 0)
+				return quirk_error(adapter, &msgs[i], "no zero length");
+		}
+	}
+	return 0;
+}
+
 /* Arbitration loss retries, within the adapter's limits. */
 int __i2c_transfer(struct i2c_adapter *adapter, struct i2c_msg *msgs, int num)
 {
@@ -90,6 +142,8 @@ int __i2c_transfer(struct i2c_adapter *adapter, struct i2c_msg *msgs, int num)
 
 	if (!adapter->algo->xfer)
 		return ret;
+	if (adapter->quirks && check_quirks(adapter, msgs, num))
+		return -EOPNOTSUPP;
 	for (int attempt = 0; attempt <= adapter->retries; attempt++) {
 		ret = adapter->algo->xfer(adapter, msgs, num);
 		if (ret != -EAGAIN || time_after(jiffies, start + (unsigned long)adapter->timeout))

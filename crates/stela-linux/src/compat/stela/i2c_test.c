@@ -30,6 +30,44 @@ static const struct i2c_algorithm algorithm = {.xfer = transfer, .functionality 
 
 static struct i2c_adapter adapter = {.algo = &algorithm, .retries = 1, .name = "test"};
 
+/* amdgpu's SMU bus: a write then a read to one address, short messages. */
+static const struct i2c_adapter_quirks quirks = {
+	.flags = I2C_AQ_COMB | I2C_AQ_COMB_SAME_ADDR | I2C_AQ_NO_ZERO_LEN,
+	.max_read_len = 8,
+	.max_write_len = 8,
+	.max_comb_1st_msg_len = 2,
+	.max_comb_2nd_msg_len = 6,
+};
+static struct i2c_adapter limited = {.algo = &algorithm, .quirks = &quirks, .name = "limited"};
+
+/* The core refuses what an adapter's quirks rule out before its transfer. */
+static void quirks_test(void)
+{
+	u8 bytes[10] = {};
+	struct i2c_msg msgs[3] = {
+		{.addr = 0x50, .len = 2, .buf = bytes},
+		{.addr = 0x50, .flags = I2C_M_RD, .len = 6, .buf = bytes},
+		{.addr = 0x50, .len = 1, .buf = bytes},
+	};
+
+	assert(!i2c_add_adapter(&limited));
+	transfers = 0;
+	results[0] = 2;
+	assert(i2c_transfer(&limited, msgs, 2) == 2 && transfers == 1);
+	transfers = 0;
+	msgs[1].addr = 0x51;
+	assert(i2c_transfer(&limited, msgs, 2) == -EOPNOTSUPP);
+	msgs[1].addr = 0x50;
+	msgs[1].len = 7;
+	assert(i2c_transfer(&limited, msgs, 2) == -EOPNOTSUPP);
+	assert(i2c_transfer(&limited, msgs, 3) == -EOPNOTSUPP);
+	msgs[2].len = 0;
+	assert(i2c_transfer(&limited, &msgs[2], 1) == -EOPNOTSUPP);
+	msgs[2].len = 9;
+	assert(i2c_transfer(&limited, &msgs[2], 1) == -EOPNOTSUPP && !transfers);
+	i2c_del_adapter(&limited);
+}
+
 void stela_linux_i2c_test(void)
 {
 	assert(!i2c_add_adapter(&adapter) && adapter.timeout == HZ);
@@ -60,4 +98,5 @@ void stela_linux_i2c_test(void)
 	assert(IS_ERR(i2c_new_client_device(&adapter, &info)));
 
 	i2c_del_adapter(&adapter);
+	quirks_test();
 }

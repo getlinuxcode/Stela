@@ -272,6 +272,8 @@ struct pci_dev *stela_linux_pci_attach(const struct stela_linux_pci_function *fu
 	}
 	dev->dev.dma_mask = &dev->dma_mask;
 	dev->dev.coherent_dma_mask = DMA_BIT_MASK(32);
+	/* As pci_device_add: the segment limits dma_set_max_seg_size sets. */
+	dev->dev.dma_parms = &dev->dma_parms;
 	dev->dev.release = release;
 	set_dma_ops(&dev->dev, &mapping_ops);
 	device_initialize(&dev->dev);
