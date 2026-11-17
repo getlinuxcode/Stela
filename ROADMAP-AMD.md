@@ -66,6 +66,7 @@ Fait sous Linux (Ubuntu 24.04, noyau 6.14, Mesa 25.2.8) :
 
 - J4 : le vrai périphérique Metal de Stela tourne sur la 9070 XT, sous Linux, sur un RADV construit à partir du Mesa de Stela avec le compilateur Metal (`libstela_radv.so`). Le premier calcul et le premier rendu sont vérifiés, et 13 891 cas de la suite Metal (98,1 %) passent à l'identique du Mac : calculs, rendus, blits, séquences, bibliothèques compilées à l'exécution, tessellation, mesh, heaps, argument buffers, indirect command buffers, vues de textures, tables de fonctions et tuiles (`docs/amd/device.md`). En route, trois patchs RADV (`9001` à `9003`) et deux corrections de Stela : un scissor par viewport, et le pipeline transmis aux commandes générées par le GPU.
 
+- J6, **la 9070 XT fonctionne dans Stela sur le vrai PC** (17 novembre 2026, démarrage sur clé USB, `xtask/scripts/amd-usb-trial.sh`) : les 20 firmwares sont lus sur la clé, amdgpu démarre la carte en 2 s (même séquence qu'en VM), le GPU exécute les commandes de Stela (graphique 163 µs, calcul 141 µs), et la console de Stela s'affiche sur l'écran (DP-3, 3440×1440 à 100 Hz). Journal complet dans `EFI/stela/boot.log` sur la clé. L'IOMMU AMD-Vi de la carte mère reste désactivé (« left untranslated: Display »), et la carte est démarrée sans réinitialisation, comme sous Linux.
 - J6, **la 9070 XT fonctionne dans Stela en VM** (17 novembre 2026) : amdgpu l'initialise entièrement, le GPU exécute les commandes que Stela lui soumet (files graphique et de calcul), et l'écran de l'utilisateur affiche l'image de Stela par DCN (barres de couleur en 3440×1440 à 100 Hz). Le mode d'essai est dans `src/amd/linux/trial.c`.
 - J6, **amdgpu démarre la 9070 XT dans Stela** (17 novembre 2026, cinquième essai en VM) : initialisation complète jusqu'à `[drm] Initialized amdgpu 3.64.0`, en 2 s. Les corrections en route : firmwares épinglés et fournis par le bundle, masque DMA de 44 bits, quirks I2C du bus du SMU, paramètres DMA des périphériques PCI.
 - J6, premier essai avec la carte (17 novembre 2026, `.stela/vm/gpu-trial/`) : amdgpu tourne dans Stela sur la 9070 XT prêtée à la VM. Il mappe les registres, lit l'IP discovery (les 11 blocs de la Navi 48 : soc24, gmc 12, ih 7, psp 14, smu 14, DCN, gfx 12, sdma 7, vcn 5, jpeg 5, mes 12) et le VBIOS (113-APM107819-101). Il s'arrête ensuite proprement au premier firmware demandé, puisque son catalogue est vide. La carte revient à amdgpu sous Linux. En chemin : pas de réinitialisation par le bus pour une Radeon (la Navi 48 ne s'en remet pas en VFIO, et amdgpu la réinitialise lui-même par son PSP), et l'horloge de service est installée en mode essai.
@@ -74,8 +75,7 @@ Fait sous Linux (Ubuntu 24.04, noyau 6.14, Mesa 25.2.8) :
 À faire ensuite, dans cet ordre :
 
 1. J6 : brancher `metal/kms.rs` (la scanout de macOS) sur amdgpu comme sur nouveau. Fait : la console de Stela sur l'écran de la Radeon.
-2. J6 : le même essai sur la vraie machine, en démarrant le PC sur Stela, sans VM.
-3. J7 : RADV dans l'image de démarrage, pour que Metal tourne sur la Radeon sous Stela.
+2. J7 : RADV dans l'image de démarrage, pour que Metal tourne sur la Radeon sous Stela.
 
 ## Jalons
 
@@ -161,7 +161,7 @@ Le plus gros chantier. Mise au point dans la VM avec la carte prêtée (voir « 
 - [x] Étapes d'initialisation validées dans le journal (VM, 17 novembre 2026) : IP discovery (11 blocs, VBIOS), 20 firmwares, GMC (16 Go de GDDR6, GART de 512 Mo), PSP (DMUB chargé par le PSP), SMU (« SMU is initialized successfully », firmware 104.80.0), Display Core sur DCN 4.0.1, MES, GFX (64 CU), SDMA, VCN, JPEG, puis `[drm] Initialized amdgpu 3.64.0` : le probe réussit. Puis Stela lui-même fait exécuter un WRITE_DATA PM4 sur la file graphique (170 µs) et sur la file de calcul (220 µs), valeurs relues (`src/amd/linux/trial.c`).
 - [ ] Affichage par DC/DCN via DRM, que `metal/kms.rs` utilise sans modification. Fait en VM (17 novembre 2026) : un client DRM interne allume l'écran de l'utilisateur (DP-3, 3440×1440 à 100 Hz, lien DP de 4 voies en HBR2, 102 images par seconde) avec des barres de couleur, vues à l'écran et relues en VRAM. Piège rencontré : amdgpu efface un nouveau buffer de VRAM par SDMA de façon asynchrone, donc il faut attendre ses fences avant d'y dessiner au CPU. La console de Stela passe ensuite sur cet écran, et l'utilisateur y a lu les lignes de démarrage. Reste `metal/kms.rs`, la scanout de macOS.
 
-**Terminé quand** amdgpu démarre la 9070 XT dans Stela et que la console passe sur l'écran géré par DCN.
+**Terminé quand** amdgpu démarre la 9070 XT dans Stela et que la console passe sur l'écran géré par DCN. Atteint sur le vrai PC le 17 novembre 2026 ; reste la scanout de macOS (`metal/kms.rs`).
 
 ### J7 : RADV dans l'image de démarrage et premier démarrage de macOS
 
