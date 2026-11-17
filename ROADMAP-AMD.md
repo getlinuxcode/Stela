@@ -73,7 +73,7 @@ Fait sous Linux (Ubuntu 24.04, noyau 6.14, Mesa 25.2.8) :
 
 À faire ensuite, dans cet ordre :
 
-1. J6 : afficher la console de Stela sur l'écran de la Radeon, et brancher `metal/kms.rs` (la scanout de macOS) sur amdgpu comme sur nouveau.
+1. J6 : brancher `metal/kms.rs` (la scanout de macOS) sur amdgpu comme sur nouveau. Fait : la console de Stela sur l'écran de la Radeon.
 2. J6 : le même essai sur la vraie machine, en démarrant le PC sur Stela, sans VM.
 3. J7 : RADV dans l'image de démarrage, pour que Metal tourne sur la Radeon sous Stela.
 
@@ -159,7 +159,7 @@ Le plus gros chantier. Mise au point dans la VM avec la carte prêtée (voir « 
 - [ ] Firmwares : ajouter au provisionnement de `stela-cli` les fichiers `amdgpu/` de linux-firmware pour la Navi 48. Noms confirmés par le premier essai : `psp_14_0_3_sos.bin`, `smu_14_0_3.bin`, `dcn_4_0_1_dmcub.bin`, `gc_12_0_1_pfp.bin` (et les autres `gc_12_0_1_*`), `gc_12_0_1_uni_mes.bin`, `sdma_7_0_1.bin`, `vcn_5_0_0.bin`, chacun demandé à l'early_init de son bloc IP.
 - [ ] Démarrage côté Stela : réclamer les cartes AMD dans `engine/gpu.rs` et `engine/start.rs`, et donner les messages d'état AMD dans `gpu_status.rs`. Fait : `engine/gpu_amd.rs` prend la Radeon (BAR 5, passage à froid commun) et démarre l'image d'amdgpu (fonctionnalité `amdgpu`). L'option `--gpu-trial` démarre le GPU sans macOS, et `xtask/scripts/amd-gpu-trial.sh` fait l'essai en VM. Restent les messages d'état et le premier essai avec la carte.
 - [x] Étapes d'initialisation validées dans le journal (VM, 17 novembre 2026) : IP discovery (11 blocs, VBIOS), 20 firmwares, GMC (16 Go de GDDR6, GART de 512 Mo), PSP (DMUB chargé par le PSP), SMU (« SMU is initialized successfully », firmware 104.80.0), Display Core sur DCN 4.0.1, MES, GFX (64 CU), SDMA, VCN, JPEG, puis `[drm] Initialized amdgpu 3.64.0` : le probe réussit. Puis Stela lui-même fait exécuter un WRITE_DATA PM4 sur la file graphique (170 µs) et sur la file de calcul (220 µs), valeurs relues (`src/amd/linux/trial.c`).
-- [ ] Affichage par DC/DCN via DRM, que `metal/kms.rs` utilise sans modification. Fait en VM (17 novembre 2026) : un client DRM interne allume l'écran de l'utilisateur (DP-3, 3440×1440 à 100 Hz, lien DP de 4 voies en HBR2, 102 images par seconde) avec des barres de couleur, vues à l'écran et relues en VRAM. Piège rencontré : amdgpu efface un nouveau buffer de VRAM par SDMA de façon asynchrone, donc il faut attendre ses fences avant d'y dessiner au CPU. Restent la console de Stela et `metal/kms.rs` sur cet écran.
+- [ ] Affichage par DC/DCN via DRM, que `metal/kms.rs` utilise sans modification. Fait en VM (17 novembre 2026) : un client DRM interne allume l'écran de l'utilisateur (DP-3, 3440×1440 à 100 Hz, lien DP de 4 voies en HBR2, 102 images par seconde) avec des barres de couleur, vues à l'écran et relues en VRAM. Piège rencontré : amdgpu efface un nouveau buffer de VRAM par SDMA de façon asynchrone, donc il faut attendre ses fences avant d'y dessiner au CPU. La console de Stela passe ensuite sur cet écran, et l'utilisateur y a lu les lignes de démarrage. Reste `metal/kms.rs`, la scanout de macOS.
 
 **Terminé quand** amdgpu démarre la 9070 XT dans Stela et que la console passe sur l'écran géré par DCN.
 
