@@ -35,6 +35,9 @@ native-profile = ["stela-soc/native-profile", "stela-engine/native-profile"]
 nvk = ["dep:stela-mesa", "stela-drivers/metal-linked"]
 # AMD fork (J6): amdgpu in the image; a Radeon RDNA 4 is claimed for it.
 amdgpu = ["stela-drivers/amdgpu-port"]
+# AMD fork (J7): Stela's Metal device on a Radeon: RADV in place of NVK
+# (`cargo xtask gpu radv`), with the GPU machinery the `nvk` feature brings.
+radv = ["nvk", "amdgpu", "stela-mesa/radv"]
 
 [dependencies]
 stela-linux = { path = "../stela-linux", features = ["kernel"] }

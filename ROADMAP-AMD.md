@@ -165,9 +165,9 @@ Le plus gros chantier. Mise au point dans la VM avec la carte prêtée (voir « 
 
 ### J7 : RADV dans l'image de démarrage et premier démarrage de macOS
 
-- [ ] `xtask/src/gpu/radv.rs`, sur le modèle de `nvk.rs` : compiler Mesa avec `-Dvulkan-drivers=amd` pour l'image UEFI.
-- [ ] Couche de liaison entre RADV et amdgpu dans Stela : adapter libdrm_amdgpu, ou écrire une liaison propre comme celle de nouveau.
-- [ ] Brancher `metal::amd::open` au démarrage.
+- [x] `xtask/src/gpu/radv.rs`, sur le modèle de `nvk.rs` : compiler Mesa avec `-Dvulkan-drivers=amd` pour l'image UEFI. Fait : `nvk.rs` prend ses choix de pilote dans une `Flavor`, et celle de RADV est sans LLVM (ACO seul), sans Rust et sans ELF. libdrm_amdgpu est compilé depuis ses sources. Cela fait 696 unités dans `target/gpu/radv`.
+- [x] Couche de liaison entre RADV et amdgpu dans Stela. Fait : libdrm_amdgpu tel quel, sur la libdrm de Stela (`compat/mesa/drm.c` et `drm_amdgpu.c`). Ses ioctls passent par le même chemin que ceux de NVK (`gpu/client.rs`). La fonctionnalité `radv` de `stela-mesa` lie RADV à la place de NVK. Les collisions de noms entre libdrm_amdgpu, la libc de Mesa et amdgpu côté noyau sont renommées.
+- [ ] Brancher `metal::amd::open` au démarrage. Fait dans le code (fonctionnalité `radv` de `stela-boot`) : `gate.rs` ouvre la Radeon par `metal::amd`, avec les options NIR de RADV et la version GC lue par `AMDGPU_INFO`. Le lien PCIe et la VRAM viennent d'amdgpu. Le mode `--gpu-trial` ouvre ce périphérique Metal. L'image démarre en VM sans carte. Reste à le voir s'ouvrir sur la carte.
 - [ ] Premier démarrage de macOS 27 en VM, avec la 9070 XT prêtée, puis l'assistant de configuration.
 - [ ] Le même démarrage sur la machine réelle.
 

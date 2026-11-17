@@ -105,7 +105,15 @@ pub(super) struct DrmDevice {
     pub revision: u8,
 }
 
+// AMD fork (J7): the queries of a bound Radeon.
+#[cfg(feature = "radv")]
+#[path = "client_amd.rs"]
+mod amd;
+#[cfg(feature = "radv")]
+pub(in crate::engine) use amd::gc_version;
+
 /// `struct drm_nouveau_getparam`.
+#[cfg_attr(feature = "radv", allow(dead_code))]
 #[repr(C)]
 struct GetParam {
     parameter: u64,
@@ -113,7 +121,9 @@ struct GetParam {
 }
 
 /// `DRM_IOCTL_NOUVEAU_GETPARAM`.
+#[cfg_attr(feature = "radv", allow(dead_code))]
 const GET_PARAM: u32 = 0xc010_6440;
+#[cfg_attr(feature = "radv", allow(dead_code))]
 const CHIPSET_ID: u64 = 11;
 /// The first render node's minor.
 pub(super) const RENDER_MINOR: u32 = 128;
@@ -1410,6 +1420,7 @@ pub(super) fn unmap(address: NonNull<u8>) {
 }
 
 /// `NOUVEAU_GETPARAM_CHIPSET_ID` of the bound GPU at `index`.
+#[cfg_attr(feature = "radv", allow(dead_code))]
 pub(super) fn chipset(index: u32) -> Option<u16> {
     let fd = submit(Operation::Open(RENDER_MINOR + index)) as c_int;
     if fd < 0 {
@@ -1429,25 +1440,34 @@ pub(super) fn chipset(index: u32) -> Option<u16> {
 }
 
 /// `NOUVEAU_GETPARAM_FB_SIZE`: the VRAM nouveau makes available.
+#[cfg_attr(feature = "radv", allow(dead_code))]
 const FB_SIZE: u64 = 8;
 
 /// The VRAM bytes of the bound GPU at `index`, for the guest's `StelaHost`.
 pub(in crate::engine) fn vram_bytes(index: u32) -> Option<u64> {
-    let fd = submit(Operation::Open(RENDER_MINOR + index)) as c_int;
-    if fd < 0 {
-        return None;
+    // AMD fork (J7): a Radeon's, from amdgpu.
+    #[cfg(feature = "radv")]
+    {
+        amd::vram_bytes(index)
     }
-    let mut parameter = GetParam {
-        parameter: FB_SIZE,
-        value: 0,
-    };
-    let result = submit(Operation::Control {
-        fd,
-        request: GET_PARAM,
-        argument: (&raw mut parameter).cast(),
-    });
-    close_descriptor(fd);
-    (result == 0 && parameter.value != 0).then_some(parameter.value)
+    #[cfg(not(feature = "radv"))]
+    {
+        let fd = submit(Operation::Open(RENDER_MINOR + index)) as c_int;
+        if fd < 0 {
+            return None;
+        }
+        let mut parameter = GetParam {
+            parameter: FB_SIZE,
+            value: 0,
+        };
+        let result = submit(Operation::Control {
+            fd,
+            request: GET_PARAM,
+            argument: (&raw mut parameter).cast(),
+        });
+        close_descriptor(fd);
+        (result == 0 && parameter.value != 0).then_some(parameter.value)
+    }
 }
 
 /// Whether a fault at `address` may be on a client's mapping: a page past

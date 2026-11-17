@@ -55,3 +55,10 @@ void amdgpu_parse_asic_ids(struct amdgpu_device *dev)
 {
 	(void)dev;
 }
+
+/* A modifier's name, for RADV's and ac's debug printouts: none here. */
+char *drmGetFormatModifierName(uint64_t modifier)
+{
+	(void)modifier;
+	return NULL;
+}

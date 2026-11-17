@@ -90,6 +90,16 @@ use stela_linux::{
 mod amd;
 #[cfg(feature = "amdgpu")]
 pub(super) use amd::screen as amd_screen;
+#[cfg(feature = "amdgpu")]
+pub(super) use amd::set_trial as set_amd_trial;
+
+/// AMD fork (J7): a GPU trial opens the Metal device on each bound Radeon,
+/// as a macOS boot would (`gate::open_service`), and says how many opened.
+#[cfg(feature = "radv")]
+pub(super) fn trial_metal() -> usize {
+    gate::open_service();
+    gate::opened()
+}
 
 type Environment = LinuxEnvironment<SLOTS>;
 type LinuxKernel = KernelOwner<Host, SLOTS>;

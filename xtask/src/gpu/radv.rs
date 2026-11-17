@@ -27,7 +27,6 @@ pub(super) const RADV: Flavor = Flavor {
     ],
     skipped: &[
         "build_id",
-        "texcompress_astc",
         "u_qsort",
         "os_file_notify",
         "os_socket",

@@ -315,7 +315,9 @@ pub(super) fn claim(
     // lifetime before Linux probe. Only the temporary UC observation is retired.
     let (bound, views) = unsafe { ready.into_parts() };
     let attachment = ManuallyDrop::new(bound.attachment);
-    let function = ManuallyDrop::new(bound.requester.into_function());
+    // Read again below for the DRM identity and the PCIe link.
+    #[cfg_attr(not(feature = "nvk"), allow(unused_mut))]
+    let mut function = ManuallyDrop::new(bound.requester.into_function());
     if reset {
         resized_bars(address, &function, &mut placement, &mut bars);
     }
@@ -346,6 +348,20 @@ pub(super) fn claim(
             revision,
         }
     };
+    // The link the Metal device reports (`metal::amd`), as an NVIDIA
+    // GPU's: its PCIe capability's Link Status.
+    #[cfg(feature = "nvk")]
+    let link = capabilities
+        .iter()
+        .find(|(_, id)| *id == PCIE_CAPABILITY)
+        .map(|(offset, _)| {
+            function
+                .config()
+                .read16(u16::from(*offset) + LINK_STATUS)
+                .map(PcieLink::from_link_status)
+        })
+        .transpose()
+        .map_err(ServiceError::Config)?;
     Ok(Claimed {
         shows_screen: owns_screen,
         device: Device {
@@ -362,7 +378,7 @@ pub(super) fn claim(
         #[cfg(feature = "nvk")]
         drm,
         #[cfg(feature = "nvk")]
-        link: None,
+        link,
         amd: true,
     })
 }
@@ -389,6 +405,9 @@ pub(super) unsafe fn start(claimed: &[Claimed]) -> Result<(), Errno> {
 /// # Safety
 /// Entered in the Linux owner, on the task that probed the GPUs.
 pub(super) unsafe fn trial() {
+    if !TRIAL.load(core::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
     unsafe extern "C" {
         fn stela_amdgpu_trial() -> core::ffi::c_int;
     }
@@ -431,4 +450,13 @@ pub(in crate::engine) fn screen() -> Option<crate::console::Framebuffer> {
         screen.height as usize,
         screen.pitch as usize / size_of::<u32>(),
     ))
+}
+
+/// Whether this boot is a GPU trial (`--gpu-trial`), whose checks
+/// [`trial`] runs once amdgpu bound the Radeon; a boot that starts macOS
+/// leaves its outputs to its own display.
+static TRIAL: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub(in crate::engine) fn set_trial() {
+    TRIAL.store(true, core::sync::atomic::Ordering::Relaxed);
 }

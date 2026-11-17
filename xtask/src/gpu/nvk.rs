@@ -765,6 +765,10 @@ fn units(
         "-DHAVE_VISIBILITY=1".to_owned(),
         // The compiler's atomic builtins, as libdrm's Meson finds them.
         "-DHAVE_LIBDRM_ATOMIC_PRIMITIVES=1".to_owned(),
+        // amdgpu in the kernel defines two of libdrm_amdgpu's names, both
+        // linked into the image; Mesa calls neither of libdrm's.
+        "-Damdgpu_bo_list_create=stela_libdrm_amdgpu_bo_list_create".to_owned(),
+        "-Damdgpu_bo_set_metadata=stela_libdrm_amdgpu_bo_set_metadata".to_owned(),
     ];
     for source in flavor.libdrm_amdgpu {
         let name = format!("libdrm_{}", source.replace(['/', '.'], "_"));

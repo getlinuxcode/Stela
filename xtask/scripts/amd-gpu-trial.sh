@@ -31,10 +31,12 @@ card=${STELA_VFIO_GPU:-0000:07:00.0}
 build() {
   cd "$root" || exit 1
   python3 -I xtask/scripts/amd-firmware-bundle.py || exit 1
+  # RADV for the Metal device on the Radeon (J7).
+  cargo xtask gpu radv || exit 1
   # The engine's test kernel, with the GPU trial added to its options.
   cargo build --offline --release --manifest-path crates/stela-boot/Cargo.toml \
     --target x86_64-unknown-uefi --target-dir target/boot \
-    --features diagnostics,amdgpu || exit 1
+    --features diagnostics,radv || exit 1
   llvm-objcopy --strip-debug target/boot/x86_64-unknown-uefi/release/stela.efi "$image" 2>/dev/null ||
     cp target/boot/x86_64-unknown-uefi/release/stela.efi "$image"
   echo "amd-gpu-trial: $image"

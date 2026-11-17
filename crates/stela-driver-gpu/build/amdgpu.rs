@@ -129,6 +129,11 @@ fn configure(linux: &Linux, kbuild: &Value, module: &Module<'_>) -> cc::Build {
     // `vsprintf.c`) reads as long long; Clang flags `L` with an integer
     // conversion on the UEFI target.
     build.flag("-Wno-format");
+    // Mesa's C library (RADV's, J7) defines sscanf too, and both link into
+    // the image: amdgpu's, the fork's `scan.c`, takes its own names.
+    build
+        .define("sscanf", "stela_amdgpu_sscanf")
+        .define("vsscanf", "stela_amdgpu_vsscanf");
     build
 }
 

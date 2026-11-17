@@ -6,7 +6,10 @@
 //! `compat/libc`, and the Metal compiler is `metal::compiler`'s.
 #![no_std]
 
+// AMD fork (J7): RADV's image links no NAK or NIL.
+#[cfg(not(feature = "radv"))]
 extern crate nak;
+#[cfg(not(feature = "radv"))]
 extern crate nil;
 
 use core::ffi::{c_char, c_void};
@@ -16,7 +19,7 @@ use core::ffi::{c_char, c_void};
 pub const COMPILER_SHA256: &str = env!("STELA_MESA_COMPILER_SHA256");
 
 unsafe extern "system" {
-    /// The Vulkan loader-ICD entry of NVK.
+    /// The Vulkan loader-ICD entry of NVK, or of RADV (`radv`).
     pub fn vk_icdGetInstanceProcAddr(instance: *mut c_void, name: *const c_char) -> *const c_void;
 }
 

@@ -29,13 +29,8 @@ use stela_drivers::gpu::metal::{
     deferred::{busy_pause_after_slice, busy_pause_millis},
     device::{lifecycle::QuiesceStatus, pass_times},
     error::Error,
-    native::{
-        self, ExportedMemory, Loader, MemoryExporter, NativeBackend, Refusals, pipeline_store, vk,
-    },
-    nvidia::{
-        Attachment,
-        open::{Gpu, OpenError, open, reopen},
-    },
+    native::{self, ExportedMemory, Loader, MemoryExporter, NativeBackend, pipeline_store, vk},
+    nvidia::Attachment,
     service::{JobSlice, Served, ServiceHost, SharedService, identity::DeviceEpoch, wire::Status},
     timing::{ExitWatch, Totals},
     vulkan::physical::PciBusInfo,
@@ -45,6 +40,15 @@ use stela_linux::{
     function::{dma_quarantine_status, quarantined_functions},
 };
 use stela_loader::{apple_device_tree::DeviceTree, stela_gpu};
+
+#[cfg(not(feature = "radv"))]
+use stela_drivers::gpu::metal::native::Refusals;
+// AMD fork (J7): a Radeon's Metal device opens through `metal::amd`, over
+// RADV, which the `radv` feature links in place of NVK.
+#[cfg(feature = "radv")]
+use stela_drivers::gpu::metal::amd::open::{Gpu, OpenError, open, reopen};
+#[cfg(not(feature = "radv"))]
+use stela_drivers::gpu::metal::nvidia::open::{Gpu, OpenError, open, reopen};
 
 type Shared = SharedService<NativeBackend, AirCompiler>;
 
@@ -60,6 +64,13 @@ const STOP_UNLOAD_SECONDS: u64 = 10;
 /// The services for the kernel's interrupts, once all are open.
 static SERVICES: AtomicPtr<Vec<Arc<Shared>>> = AtomicPtr::new(ptr::null_mut());
 
+// AMD fork (J7): RADV's NIR options (`amd/radv_host/nir_options.c`).
+#[cfg(feature = "radv")]
+unsafe extern "C" {
+    fn stela_radv_nir_options(physical: vk::PhysicalDevice) -> *const c_void;
+}
+
+#[cfg(not(feature = "radv"))]
 unsafe extern "C" {
     fn stela_nvk_nir_options(physical: vk::PhysicalDevice) -> *const c_void;
     /// `compat/mesa/submit_thread.c`.
@@ -1118,11 +1129,20 @@ impl MemoryExporter for Exporter {
 }
 
 fn service(gpu: &Gpu, stack: u64) -> Result<Arc<Shared>, OpenError> {
+    #[cfg(not(feature = "radv"))]
     let compiler = |physical| {
         // SAFETY: NVK's own physical device, whose options last as long.
         let options = unsafe { stela_nvk_nir_options(physical) };
         compiler::Service::linked(NonNull::new(options.cast_mut()).expect("NVK has NIR options"))
     };
+    // AMD fork (J7): RADV's options for its device.
+    #[cfg(feature = "radv")]
+    let compiler = |physical| {
+        // SAFETY: RADV's own physical device, whose options last as long.
+        let options = unsafe { stela_radv_nir_options(physical) };
+        compiler::Service::linked(NonNull::new(options.cast_mut()).expect("RADV has NIR options"))
+    };
+    #[cfg(not(feature = "radv"))]
     let loader = Loader {
         get_instance_proc_addr: entry,
         log: driver_message,
@@ -1135,6 +1155,16 @@ fn service(gpu: &Gpu, stack: u64) -> Result<Arc<Shared>, OpenError> {
             count: stela_nvk_count_failures,
         }),
         // An import's driver work after its turn may wait for Linux here.
+        relax,
+    };
+    // AMD fork (J7): RADV submits on the calling PE, whose DRM requests
+    // reach Linux as any client's do; a refused submission fails the device.
+    #[cfg(feature = "radv")]
+    let loader = Loader {
+        get_instance_proc_addr: entry,
+        log: driver_message,
+        submit_thread: None,
+        refusals: None,
         relax,
     };
     // SAFETY: the linked NVK and compiler, which last for the boot.
@@ -1188,6 +1218,13 @@ pub(in crate::engine) fn open_service() {
     SERVICES.store(Box::into_raw(Box::new(services)), Ordering::Release);
 }
 
+/// AMD fork (J7): how many services [`open_service`] opened.
+#[cfg(feature = "radv")]
+pub(in crate::engine) fn opened() -> usize {
+    // SAFETY: [`open_service`] published it, and it lasts for the boot.
+    unsafe { SERVICES.load(Ordering::Acquire).as_ref() }.map_or(0, Vec::len)
+}
+
 /// Runs the image's C constructors once, on the stack of whoever opens first.
 fn construct(constructed: &mut bool) {
     if !core::mem::replace(constructed, true) {
@@ -1210,8 +1247,14 @@ fn open_gpu(
     let Some(link) = bound.link else {
         return refuse("no PCIe link");
     };
+    #[cfg(not(feature = "radv"))]
     let Some(chipset) = client::chipset(index as u32) else {
         return refuse("no chipset reported");
+    };
+    // AMD fork (J7): the graphics core amdgpu's IP discovery read.
+    #[cfg(feature = "radv")]
+    let Some(gc) = client::gc_version(index as u32) else {
+        return refuse("no graphics core version reported");
     };
     let Some(stack) = Stack::map(gpu.window, STACK_BYTES) else {
         return refuse("no memory for its service");
@@ -1226,7 +1269,10 @@ fn open_gpu(
             device: bound.drm.slot.into(),
             function: bound.drm.function.into(),
         },
+        #[cfg(not(feature = "radv"))]
         chipset,
+        #[cfg(feature = "radv")]
+        gc,
         // A GPU in a Thunderbolt enclosure reaches Stela as the function
         // firmware enumerated, like any other in a slot.
         attachment: Attachment {

@@ -3100,6 +3100,8 @@ fn start_devices(
             // macOS, and reports how far it got.
             let (work, gpus) = match work {
                 Ok(work) if options.gpu_trial && !options.boots_macos() => {
+                    #[cfg(feature = "amdgpu")]
+                    gpu::set_amd_trial();
                     let started = open_gpus(work, mmio, remappers, handoff, host_firmware, gpus);
                     output::arguments(format_args!("GPU TRIAL started={started}\n"));
                     // The console moves to the Radeon's screen, and stays
@@ -3109,6 +3111,18 @@ fn start_devices(
                         crate::status::take_screen(Some(screen));
                         crate::status::info("Stela's console on the Radeon's screen (GPU trial)");
                         output::arguments(format_args!("GPU TRIAL console on the Radeon\n"));
+                        // AMD fork (J7): the Metal device over RADV.
+                        #[cfg(feature = "radv")]
+                        {
+                            crate::status::begin("Opening the Metal device on the Radeon");
+                            let opened = gpu::trial_metal();
+                            output::arguments(format_args!("GPU TRIAL metal services={opened}\n"));
+                            if opened > 0 {
+                                crate::status::done("opened over RADV");
+                            } else {
+                                crate::status::warn("refused; the boot log says why");
+                            }
+                        }
                         let end = host::rdtsc().saturating_add(handoff.tsc_hz.saturating_mul(15));
                         while host::rdtsc() < end {
                             core::hint::spin_loop();

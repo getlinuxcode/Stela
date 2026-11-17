@@ -46,3 +46,17 @@ int inotify_rm_watch(int fd, int watch)
 	errno = EBADF;
 	return -1;
 }
+
+/*
+ * What `__builtin_cpu_supports` reads (compiler-rt's), which AMD's address
+ * library asks to pick an AVX2 copy of tiled images. Nothing initializes
+ * it in the image, so every feature reads absent and the plain copy runs.
+ */
+struct stela_cpu_model {
+	unsigned int vendor;
+	unsigned int type;
+	unsigned int subtype;
+	unsigned int features[1];
+};
+struct stela_cpu_model __cpu_model;
+unsigned int __cpu_features2[3];
